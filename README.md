@@ -126,10 +126,7 @@ Copyright 2026 Eru Studio Inc. All rights reserved.
 
 ## 🤝 Support
 
-For technical support:
-- **Email**: jsorola11@gmail.com
-- **Phone**: (02) 8887-8170 Local 153
-- **Department**: HR-DMRC
+
 
 ---
 
