@@ -17,18 +17,12 @@ A modern, professional email automation system designed for bulk email sending w
 
 ## 🚀 Quick Start
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/eru-email-sender-pro.git
-   cd eru-email-sender-pro
-   ```
-
-2. **Install dependencies**
+1. **Install dependencies**
    ```bash
    pip install -r requirements.txt
    ```
 
-3. **Run the application**
+2. **Run the application**
    ```bash
    python main.py
    ```
