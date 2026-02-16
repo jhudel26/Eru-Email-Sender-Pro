@@ -440,8 +440,13 @@ class EmailApp(QWidget):
         # Determine icon path based on environment
         icon_base_path = "EMAIL.ico"
         if getattr(sys, 'frozen', False):
-            app_dir = os.path.dirname(sys.executable)
-            icon_base_path = os.path.join(app_dir, "EMAIL.ico")
+            # First try PyInstaller's temporary directory where bundled files are extracted
+            if hasattr(sys, '_MEIPASS'):
+                icon_base_path = os.path.join(sys._MEIPASS, "EMAIL.ico")
+            else:
+                # Fallback to executable directory
+                app_dir = os.path.dirname(sys.executable)
+                icon_base_path = os.path.join(app_dir, "EMAIL.ico")
         
         for size in icon_sizes:
             app_icon.addFile(icon_base_path, QSize(size, size))
@@ -535,10 +540,15 @@ class EmailApp(QWidget):
         # Handle both script and executable environments
         icon_path = "EMAIL.ico"
         
-        # If running as executable, check the application directory
+        # If running as executable, check PyInstaller's temporary directory first
         if getattr(sys, 'frozen', False):
-            app_dir = os.path.dirname(sys.executable)
-            icon_path = os.path.join(app_dir, "EMAIL.ico")
+            # First try PyInstaller's temporary directory where bundled files are extracted
+            if hasattr(sys, '_MEIPASS'):
+                icon_path = os.path.join(sys._MEIPASS, "EMAIL.ico")
+            else:
+                # Fallback to executable directory
+                app_dir = os.path.dirname(sys.executable)
+                icon_path = os.path.join(app_dir, "EMAIL.ico")
         
         if os.path.exists(icon_path):
             return QIcon(icon_path)
