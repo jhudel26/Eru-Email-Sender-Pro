@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
     QPushButton, QFileDialog, QTableWidget, QTableWidgetItem,
     QProgressBar, QTextEdit, QMessageBox, QSplitter,
     QLineEdit, QToolBar, QLabel, QFrame, QScrollArea,
-    QGroupBox, QSizePolicy, QSpacerItem, QHeaderView, QComboBox
+    QGroupBox, QSizePolicy, QSpacerItem, QHeaderView, QComboBox,
+    QTabWidget
 )
 from PySide6.QtGui import QFont, QAction, QIcon, QPalette, QColor, QPixmap, QTextCursor, QTextBlockFormat, QKeySequence
 from PySide6.QtCore import Qt, QThread, Signal, QSize
@@ -25,7 +26,17 @@ from PySide6.QtCore import Qt, QThread, Signal, QSize
 # =====================================================
 class SettingsManager:
     def __init__(self, config_file="settings.json"):
-        self.config_file = config_file
+        # Handle both script and executable environments
+        if getattr(sys, 'frozen', False):
+            # Running as PyInstaller executable
+            # Use user's home directory for settings to ensure writability
+            app_data_dir = os.path.join(os.path.expanduser("~"), "EruEmailSender")
+            os.makedirs(app_data_dir, exist_ok=True)
+            self.config_file = os.path.join(app_data_dir, config_file)
+        else:
+            # Running as script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.config_file = os.path.join(script_dir, config_file)
         self.default_settings = {
             "window_geometry": None,
             "paragraph_spacing": 12,
@@ -33,7 +44,8 @@ class SettingsManager:
             "last_excel_path": "",
             "auto_save_interval": 5,
             "retry_failed_emails": True,
-            "max_retries": 3
+            "max_retries": 3,
+            "last_selected_template": "default"
         }
         self.settings = self.load_settings()
     
@@ -46,8 +58,9 @@ class SettingsManager:
                     settings = self.default_settings.copy()
                     settings.update(loaded_settings)
                     return settings
-            return self.default_settings.copy()
-        except Exception:
+            else:
+                return self.default_settings.copy()
+        except Exception as e:
             return self.default_settings.copy()
     
     def save_settings(self):
@@ -417,12 +430,21 @@ class EmailApp(QWidget):
         self.setStyleSheet(self.modern_styles())
         
         # Set application icon and style
-        self.setWindowIcon(self.create_app_icon())
+        window_icon = self.create_app_icon()
+        self.setWindowIcon(window_icon)
+        
+        # Set application-wide icon for all windows
         app_icon = QIcon()
-        app_icon.addFile("EMAIL.ico", QSize(16, 16))
-        app_icon.addFile("EMAIL.ico", QSize(32, 32))
-        app_icon.addFile("EMAIL.ico", QSize(48, 48))
-        app_icon.addFile("EMAIL.ico", QSize(64, 64))
+        icon_sizes = [16, 32, 48, 64, 128, 256]
+        
+        # Determine icon path based on environment
+        icon_base_path = "EMAIL.ico"
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+            icon_base_path = os.path.join(app_dir, "EMAIL.ico")
+        
+        for size in icon_sizes:
+            app_icon.addFile(icon_base_path, QSize(size, size))
         QApplication.setWindowIcon(app_icon)
         
         # Start maximized
@@ -440,7 +462,17 @@ class EmailApp(QWidget):
         controls_widget = self.create_controls_section()
         main_layout.addWidget(controls_widget)
 
-        # MAIN CONTENT AREA
+        # MAIN CONTENT AREA WITH TABS
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("mainTabWidget")
+        
+        # TAB 1: MAIN DASHBOARD
+        dashboard_tab = QWidget()
+        dashboard_layout = QVBoxLayout(dashboard_tab)
+        dashboard_layout.setContentsMargins(0, 0, 0, 0)
+        dashboard_layout.setSpacing(15)
+        
+        # Dashboard content splitter
         content_splitter = QSplitter(Qt.Horizontal)
         content_splitter.setHandleWidth(2)
         content_splitter.setStyleSheet("""
@@ -458,13 +490,26 @@ class EmailApp(QWidget):
         right_panel = self.create_status_section()
         content_splitter.addWidget(right_panel)
         
-        # Give more width to recipient data
-        content_splitter.setSizes([1000, 400])
-        main_layout.addWidget(content_splitter)
-
-        # EMAIL COMPOSER SECTION (moved to bottom)
+        # Set splitter proportions (70% table, 30% status)
+        content_splitter.setSizes([980, 420])
+        content_splitter.setStretchFactor(0, 7)
+        content_splitter.setStretchFactor(1, 3)
+        
+        dashboard_layout.addWidget(content_splitter)
+        self.tab_widget.addTab(dashboard_tab, "📊 Main Dashboard")
+        
+        # TAB 2: EMAIL COMPOSER (WIDE VIEW)
+        composer_tab = QWidget()
+        composer_layout = QVBoxLayout(composer_tab)
+        composer_layout.setContentsMargins(0, 0, 0, 0)
+        composer_layout.setSpacing(15)
+        
+        # Email composer with wide view
         email_composer_widget = self.create_email_panel()
-        main_layout.addWidget(email_composer_widget)
+        composer_layout.addWidget(email_composer_widget)
+        self.tab_widget.addTab(composer_tab, "✉️ Email Composer")
+        
+        main_layout.addWidget(self.tab_widget)
 
         # CONNECTIONS
         self.export_button.clicked.connect(self.export_template)
@@ -477,6 +522,8 @@ class EmailApp(QWidget):
         
         # Initialize UI state
         self.load_templates()  # Load saved templates
+        # Unblock signals after initialization is complete
+        self.template_combo.blockSignals(False)
         self.setup_keyboard_shortcuts()  # Setup keyboard shortcuts
         self.update_ui_state()
 
@@ -484,10 +531,22 @@ class EmailApp(QWidget):
     # UI COMPONENT CREATION METHODS
     # =================================================
     def create_app_icon(self):
-        """Create a simple app icon using QPixmap"""
-        pixmap = QPixmap(32, 32)
-        pixmap.fill(QColor("#4a90e2"))
-        return QIcon(pixmap)
+        """Create app icon using the EMAIL.ico file"""
+        # Handle both script and executable environments
+        icon_path = "EMAIL.ico"
+        
+        # If running as executable, check the application directory
+        if getattr(sys, 'frozen', False):
+            app_dir = os.path.dirname(sys.executable)
+            icon_path = os.path.join(app_dir, "EMAIL.ico")
+        
+        if os.path.exists(icon_path):
+            return QIcon(icon_path)
+        else:
+            # Fallback to a simple colored icon if EMAIL.ico is not found
+            pixmap = QPixmap(32, 32)
+            pixmap.fill(QColor("#4a90e2"))
+            return QIcon(pixmap)
     
     def create_header(self):
         """Create the header section with title and description"""
@@ -604,6 +663,8 @@ class EmailApp(QWidget):
         self.template_combo = QComboBox()
         self.template_combo.setObjectName("templateCombo")
         self.template_combo.addItem("Default HR Notice", "default")
+        # Block signals during initialization to prevent overwriting saved settings
+        self.template_combo.blockSignals(True)
         self.template_combo.currentIndexChanged.connect(self.load_template)
         
         self.save_template_btn = QPushButton("💾 Save Template")
@@ -686,7 +747,8 @@ class EmailApp(QWidget):
         self.email_editor = QTextEdit()
         self.email_editor.setObjectName("emailEditor")
         self.email_editor.setFont(QFont("Segoe UI", 11))
-        self.email_editor.setMinimumHeight(200)
+        self.email_editor.setMinimumHeight(500)  # Increased height for wide view
+        self.email_editor.setMinimumWidth(800)   # Set minimum width for wide view
         self.email_editor.setAcceptRichText(True)
         # Ensure scrollbars are always visible when needed
         self.email_editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -1108,9 +1170,29 @@ class EmailApp(QWidget):
         # Add saved templates
         for name in templates.keys():
             self.template_combo.addItem(name, name)
+        
+        # Restore last selected template
+        last_template = self.settings.get("last_selected_template", "default")
+        
+        template_found = False
+        for i in range(self.template_combo.count()):
+            item_data = self.template_combo.itemData(i)
+            if item_data == last_template:
+                # Temporarily block signals to avoid triggering load_template twice
+                self.template_combo.blockSignals(True)
+                self.template_combo.setCurrentIndex(i)
+                self.template_combo.blockSignals(False)
+                # Load the template content directly without signal
+                self._load_template_content(i)
+                template_found = True
+                break
+        
+        if not template_found:
+            # Default template is already selected at index 0
+            self._load_template_content(0)
     
-    def load_template(self, index):
-        """Load selected template into editor"""
+    def _load_template_content(self, index):
+        """Load template content without saving the last selected template"""
         if index == 0:  # Default template
             self.subject_input.setText("NOTICE TO SUBMIT LACKING EMPLOYMENT REQUIREMENTS - {{fullname}}")
             default_body = """
@@ -1128,7 +1210,7 @@ class EmailApp(QWidget):
 """
             self.email_editor.setHtml(default_body)
         else:
-            template_name = self.template_combo.currentData()
+            template_name = self.template_combo.itemData(index)  # Use index instead of currentData
             templates = self.settings.get("email_templates", {})
             if template_name in templates:
                 template = templates[template_name]
@@ -1141,6 +1223,15 @@ class EmailApp(QWidget):
             self.apply_editor_paragraph_spacing(px)
         except Exception:
             pass
+
+    def load_template(self, index):
+        """Load selected template into editor"""
+        # Load the content
+        self._load_template_content(index)
+        
+        # Save the last selected template
+        template_name = self.template_combo.currentData()
+        self.settings.set("last_selected_template", template_name)
     
     def save_template(self):
         """Save current email as template"""
@@ -1547,6 +1638,44 @@ class EmailApp(QWidget):
             border: 2px solid #334155;
             font-family: 'Consolas', 'Monaco', monospace;
             font-size: 10pt;
+        }
+        
+        /* =============================================
+           TAB WIDGET STYLING
+           ============================================= */
+        QTabWidget::pane {
+            border: 1px solid #e2e8f0;
+            background: white;
+            border-radius: 8px;
+            top: -1px;
+        }
+        
+        QTabBar::tab {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            padding: 12px 24px;
+            margin-right: 2px;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            font-weight: 500;
+            font-size: 11pt;
+            color: #64748b;
+        }
+        
+        QTabBar::tab:selected {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #3b82f6, stop:1 #2563eb);
+            color: white;
+            border-bottom: 2px solid #2563eb;
+        }
+        
+        QTabBar::tab:hover:!selected {
+            background: #e2e8f0;
+            color: #1e40af;
+        }
+        
+        #mainTabWidget QTabBar::tab {
+            min-width: 150px;
         }
         """
 

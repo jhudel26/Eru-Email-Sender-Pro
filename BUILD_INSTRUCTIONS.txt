@@ -1,0 +1,71 @@
+Eru Email Sender Pro - Build Instructions (v1.1.1)
+==============================================
+
+Project Structure (Clean & Optimized):
+------------------------------------
+Essential Files Only:
+├── main.py                 # Main application source code
+├── requirements.txt         # Python dependencies
+├── EMAIL.ico             # Application icon
+├── version_info.txt       # Version information for executable
+├── Eru Email Sender Pro.spec  # PyInstaller configuration
+├── installer_script.iss  # Inno Setup installer script
+├── build_installer.bat    # Automated build script
+├── dist/                  # Built executable
+└── installer_output/      # Final installer (created by Inno Setup)
+
+Removed Files:
+- .gitignore (development file)
+- README.md (documentation)
+- settings.json (user-specific, generated at runtime)
+- logs/ (runtime directory)
+- build/ (temporary build files)
+
+Build Process:
+-------------
+
+Option 1: Automated Build (Recommended)
+--------------------------------------
+Run: build_installer.bat
+This will:
+1. Clean previous builds
+2. Build executable with PyInstaller
+3. Create installer with Inno Setup
+4. Output: installer_output/EruEmailSenderPro_Setup.exe
+
+Option 2: Manual Build
+---------------------
+Step 1: Build Executable
+python -m PyInstaller --clean "Eru Email Sender Pro.spec"
+
+Step 2: Create Installer
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer_script.iss
+
+Final Output:
+------------
+- Executable: dist/Eru Email Sender Pro.exe (77.7 MB)
+- Installer: installer_output/EruEmailSenderPro_Setup.exe
+
+Installer Features:
+------------------
+- Modern wizard interface
+- Desktop shortcut option
+- Start menu shortcuts
+- Automatic uninstaller
+- Version information
+- Professional branding
+- 64-bit optimized
+- Admin privileges for proper installation
+
+System Requirements:
+-------------------
+- Windows 10/11 (64-bit)
+- Microsoft Outlook
+- Administrative rights for installation
+
+Notes:
+------
+- The executable is self-contained with all dependencies
+- Settings are stored in %USERPROFILE%\EruEmailSender\settings.json
+- No additional files needed for distribution
+- Icon and version info embedded in executable
