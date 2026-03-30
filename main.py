@@ -373,11 +373,12 @@ class EmailWorker(QThread):
             start_sent_count = sent.Items.Count
 
             # --- ✅ NEW LOGIC HERE ---
+            account = str(row["Account"]).strip()       # e.g. "ACC-001"
             full_name = str(row["Full Name"]).strip()   # e.g. "Dela Cruz, Juan"
             surname = get_surname(full_name)            # e.g. "Dela Cruz"
 
             # Replace placeholders accordingly
-            subject = self.subject.replace("{{fullname}}", full_name)
+            subject = self.subject.replace("{{account}}", account).replace("{{Account}}", account).replace("{{fullname}}", full_name)
             body_raw = self.body_template.replace("{{fullname}}", surname)
             body = build_outlook_safe_html(body_raw, self.para_spacing_px)
 
@@ -696,7 +697,7 @@ class EmailApp(QWidget):
         self.subject_input = QLineEdit()
         self.subject_input.setObjectName("subjectInput")
         self.subject_input.setPlaceholderText("Enter email subject here...")
-        self.subject_input.setText("NOTICE TO SUBMIT LACKING EMPLOYMENT REQUIREMENTS - {{fullname}}")
+        self.subject_input.setText("NOTICE TO SUBMIT LACKING EMPLOYMENT REQUIREMENTS - {{fullname}} - {{account}}")
         subject_layout.addWidget(self.subject_input)
         
         email_layout.addWidget(subject_group)
@@ -848,14 +849,15 @@ class EmailApp(QWidget):
             wb = Workbook()
             ws = wb.active
             ws.title = "Email Sending Setup"
-            headers = ["Full Name", "Email", "CC", "Attachment Path"]
+            headers = ["Account", "Full Name", "Email", "CC", "Attachment Path"]
             for col, header in enumerate(headers, start=1):
                 ws.cell(row=1, column=col, value=header).font = Font(bold=True)
-            ws.cell(row=2, column=1).value = "Dela Cruz, Juan"
-            ws.cell(row=2, column=2).value = "juan@email.com"
-            ws.cell(row=2, column=3).value = ""
-            ws.cell(row=2, column=4).value = "C:\\Path\\To\\Attachment.pdf"
-            for col_letter, width in zip(["A", "B", "C", "D"], [25, 30, 30, 40]):
+            ws.cell(row=2, column=1).value = "ACC-001"
+            ws.cell(row=2, column=2).value = "Dela Cruz, Juan"
+            ws.cell(row=2, column=3).value = "juan@email.com"
+            ws.cell(row=2, column=4).value = ""
+            ws.cell(row=2, column=5).value = "C:\\Path\\To\\Attachment.pdf"
+            for col_letter, width in zip(["A", "B", "C", "D", "E"], [15, 25, 30, 30, 40]):
                 ws.column_dimensions[col_letter].width = width
             wb.save(file_path)
             QMessageBox.information(self, "Success", "Excel template exported successfully.")
@@ -874,10 +876,11 @@ class EmailApp(QWidget):
         try:
             df = pd.read_excel(file_path, sheet_name="Email Sending Setup")
             df = df.rename(columns={
-                df.columns[0]: "Full Name",
-                df.columns[1]: "Email",
-                df.columns[2]: "CC",
-                df.columns[3]: "Attachment Path"
+                df.columns[0]: "Account",
+                df.columns[1]: "Full Name",
+                df.columns[2]: "Email",
+                df.columns[3]: "CC",
+                df.columns[4]: "Attachment Path"
             })
             df = df.fillna("")
             
@@ -899,7 +902,7 @@ class EmailApp(QWidget):
             # Use validated dataframe
             df = valid_df
             df["Status"] = "Pending"
-            self.df = df[["Full Name", "Email", "CC", "Attachment Path", "Status"]]
+            self.df = df[["Account", "Full Name", "Email", "CC", "Attachment Path", "Status"]]
             self.populate_table()
             
             # Update recipient counter
@@ -928,22 +931,23 @@ class EmailApp(QWidget):
         # Set column widths
         header = self.table.horizontalHeader()
         header.setStretchLastSection(False)  # Don't stretch last section (Status)
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Full Name
-        header.setSectionResizeMode(1, QHeaderView.Stretch)  # Email
-        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # CC
-        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Attachment Path
-        header.setSectionResizeMode(4, QHeaderView.Fixed)  # Status - fixed width
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # Account
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)  # Full Name
+        header.setSectionResizeMode(2, QHeaderView.Stretch)  # Email
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # CC
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # Attachment Path
+        header.setSectionResizeMode(5, QHeaderView.Fixed)  # Status - fixed width
         header.setDefaultSectionSize(100)  # Default width for stretch columns
         
         # Set specific width for Status column
-        header.resizeSection(4, 80)  # Status column width
+        header.resizeSection(5, 80)  # Status column width
         
         for i in range(len(self.df)):
             for j in range(len(self.df.columns)):
                 item = QTableWidgetItem(str(self.df.iloc[i, j]))
                 
                 # Color code status
-                if j == 4:  # Status column
+                if j == 5:  # Status column
                     status = str(self.df.iloc[i, j]).lower()
                     if status == "sent":
                         item.setBackground(QColor("#d4edda"))
@@ -1001,10 +1005,10 @@ class EmailApp(QWidget):
     # UPDATE STATUS & LOGS
     # =================================================
     def update_status(self, row, status):
-        self.table.setItem(row, 4, QTableWidgetItem(status))
+        self.table.setItem(row, 5, QTableWidgetItem(status))
         # Update the dataframe as well
         if self.df is not None and row < len(self.df):
-            self.df.iloc[row, 4] = status
+            self.df.iloc[row, 5] = status
 
     def log(self, message):
         """Log message to both UI and file"""
@@ -1089,9 +1093,9 @@ class EmailApp(QWidget):
         sample_row = QHBoxLayout()
         sample_label = QLabel("Sample Recipient:")
         sample_combo = QComboBox()
-        sample_combo.addItem("Sample: Dela Cruz, Juan", "Dela Cruz, Juan")
-        sample_combo.addItem("Sample: Smith, John", "Smith, John")
-        sample_combo.addItem("Sample: Garcia, Maria", "Garcia, Maria")
+        sample_combo.addItem("Sample: ACC-001 - Dela Cruz, Juan", {"account": "ACC-001", "name": "Dela Cruz, Juan"})
+        sample_combo.addItem("Sample: ACC-002 - Smith, John", {"account": "ACC-002", "name": "Smith, John"})
+        sample_combo.addItem("Sample: ACC-003 - Garcia, Maria", {"account": "ACC-003", "name": "Garcia, Maria"})
         sample_row.addWidget(sample_label)
         sample_row.addWidget(sample_combo)
         sample_row.addStretch()
@@ -1104,8 +1108,10 @@ class EmailApp(QWidget):
         
         # Update preview when sample changes
         def update_preview():
-            sample_name = sample_combo.currentData()
-            subject = self.subject_input.text().replace("{{fullname}}", sample_name)
+            sample_data = sample_combo.currentData()
+            sample_account = sample_data["account"]
+            sample_name = sample_data["name"]
+            subject = self.subject_input.text().replace("{{account}}", sample_account).replace("{{Account}}", sample_account).replace("{{fullname}}", sample_name)
             body_html = self.email_editor.toHtml().replace("{{fullname}}", get_surname(sample_name))
             
             # Apply Outlook-safe formatting
@@ -1204,7 +1210,7 @@ class EmailApp(QWidget):
     def _load_template_content(self, index):
         """Load template content without saving the last selected template"""
         if index == 0:  # Default template
-            self.subject_input.setText("NOTICE TO SUBMIT LACKING EMPLOYMENT REQUIREMENTS - {{fullname}}")
+            self.subject_input.setText("NOTICE TO SUBMIT LACKING EMPLOYMENT REQUIREMENTS - {{fullname}} - {{account}}")
             default_body = """
 <p>Dear {{fullname}},</p>
 
