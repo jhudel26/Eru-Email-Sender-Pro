@@ -4,6 +4,7 @@ import time
 import re
 import json
 import logging
+import sqlite3
 from datetime import datetime
 import pandas as pd
 import win32com.client
@@ -19,14 +20,364 @@ from PySide6.QtWidgets import (
     QTabWidget
 )
 from PySide6.QtGui import QFont, QAction, QIcon, QPalette, QColor, QPixmap, QTextCursor, QTextBlockFormat, QKeySequence
-from PySide6.QtCore import Qt, QThread, Signal, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QSize, QTimer
+
+# =====================================================
+# DATABASE MANAGER
+# =====================================================
+class DatabaseManager:
+    """Manages SQLite database for persistent storage"""
+    
+    def __init__(self, db_name="eru_email_sender.db"):
+        # Handle both script and executable environments
+        if getattr(sys, 'frozen', False):
+            # Running as PyInstaller executable
+            app_data_dir = os.path.join(os.path.expanduser("~"), "EruEmailSender")
+            os.makedirs(app_data_dir, exist_ok=True)
+            self.db_path = os.path.join(app_data_dir, db_name)
+        else:
+            # Running as script
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            self.db_path = os.path.join(script_dir, db_name)
+        
+        self.initialize_database()
+    
+    def initialize_database(self):
+        """Create database tables if they don't exist"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Settings table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Templates table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    subject TEXT,
+                    body TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Campaigns table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS campaigns (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    total_recipients INTEGER DEFAULT 0,
+                    confirmed_count INTEGER DEFAULT 0,
+                    failed_count INTEGER DEFAULT 0,
+                    unknown_count INTEGER DEFAULT 0,
+                    cancelled_count INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'pending',
+                    started_at TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Recipients table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS recipients (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT NOT NULL,
+                    account TEXT,
+                    full_name TEXT,
+                    email TEXT,
+                    cc TEXT,
+                    attachment_path TEXT,
+                    status TEXT DEFAULT 'pending',
+                    attempt_number INTEGER DEFAULT 0,
+                    last_error TEXT,
+                    last_attempt_time TIMESTAMP,
+                    row_index INTEGER,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+                )
+            ''')
+            
+            # Send attempts table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS send_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    recipient_id INTEGER NOT NULL,
+                    campaign_id TEXT NOT NULL,
+                    attempt_number INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    error_message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (recipient_id) REFERENCES recipients(id),
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(id)
+                )
+            ''')
+            
+            # Send logs table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS send_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    campaign_id TEXT,
+                    recipient_id INTEGER,
+                    log_level TEXT DEFAULT 'info',
+                    message TEXT,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (campaign_id) REFERENCES campaigns(id),
+                    FOREIGN KEY (recipient_id) REFERENCES recipients(id)
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Error initializing database: {e}")
+    
+    def get_connection(self):
+        """Get a database connection"""
+        return sqlite3.connect(self.db_path)
+    
+    def save_setting(self, key, value):
+        """Save a setting to the database"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            ''', (key, json.dumps(value) if isinstance(value, (dict, list)) else str(value)))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error saving setting: {e}")
+            return False
+    
+    def get_setting(self, key, default=None):
+        """Get a setting from the database"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                value = result[0]
+                # Try to parse as JSON
+                try:
+                    return json.loads(value)
+                except:
+                    return value
+            return default
+        except Exception as e:
+            print(f"Error getting setting: {e}")
+            return default
+    
+    def create_campaign(self, campaign_id, name, total_recipients):
+        """Create a new campaign"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO campaigns (id, name, total_recipients, status, started_at)
+                VALUES (?, ?, ?, 'in_progress', CURRENT_TIMESTAMP)
+            ''', (campaign_id, name, total_recipients))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error creating campaign: {e}")
+            return False
+    
+    def update_campaign_status(self, campaign_id, status):
+        """Update campaign status"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            if status == 'completed':
+                cursor.execute('''
+                    UPDATE campaigns 
+                    SET status = ?, completed_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (status, campaign_id))
+            else:
+                cursor.execute('''
+                    UPDATE campaigns SET status = ? WHERE id = ?
+                ''', (status, campaign_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error updating campaign status: {e}")
+            return False
+    
+    def update_campaign_counts(self, campaign_id):
+        """Update campaign count statistics"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE campaigns SET
+                    confirmed_count = (SELECT COUNT(*) FROM recipients WHERE campaign_id = ? AND status = 'confirmed'),
+                    failed_count = (SELECT COUNT(*) FROM recipients WHERE campaign_id = ? AND status = 'failed'),
+                    unknown_count = (SELECT COUNT(*) FROM recipients WHERE campaign_id = ? AND status = 'unknown'),
+                    cancelled_count = (SELECT COUNT(*) FROM recipients WHERE campaign_id = ? AND status = 'cancelled')
+                WHERE id = ?
+            ''', (campaign_id, campaign_id, campaign_id, campaign_id, campaign_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error updating campaign counts: {e}")
+            return False
+    
+    def add_recipient(self, campaign_id, account, full_name, email, cc, attachment_path, row_index):
+        """Add a recipient to a campaign"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO recipients (campaign_id, account, full_name, email, cc, attachment_path, row_index)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (campaign_id, account, full_name, email, cc, attachment_path, row_index))
+            conn.commit()
+            recipient_id = cursor.lastrowid
+            conn.close()
+            return recipient_id
+        except Exception as e:
+            print(f"Error adding recipient: {e}")
+            return None
+    
+    def update_recipient_status(self, recipient_id, status, error_message=None):
+        """Update recipient status"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # Increment attempt number
+            cursor.execute('''
+                UPDATE recipients 
+                SET status = ?, 
+                    attempt_number = attempt_number + 1,
+                    last_error = ?,
+                    last_attempt_time = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (status, error_message, recipient_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error updating recipient status: {e}")
+            return False
+    
+    def log_send_attempt(self, recipient_id, campaign_id, attempt_number, status, error_message=None):
+        """Log a send attempt"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO send_attempts (recipient_id, campaign_id, attempt_number, status, error_message)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (recipient_id, campaign_id, attempt_number, status, error_message))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error logging send attempt: {e}")
+            return False
+    
+    def log_message(self, campaign_id, recipient_id, log_level, message):
+        """Log a message"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO send_logs (campaign_id, recipient_id, log_level, message)
+                VALUES (?, ?, ?, ?)
+            ''', (campaign_id, recipient_id, log_level, message))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error logging message: {e}")
+            return False
+    
+    def get_interrupted_campaigns(self):
+        """Get campaigns that were interrupted (in_progress status)"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, name, total_recipients, confirmed_count, failed_count, 
+                       unknown_count, cancelled_count, started_at
+                FROM campaigns 
+                WHERE status = 'in_progress'
+                ORDER BY started_at DESC
+            ''')
+            campaigns = cursor.fetchall()
+            conn.close()
+            return campaigns
+        except Exception as e:
+            print(f"Error getting interrupted campaigns: {e}")
+            return []
+    
+    def get_campaign_recipients(self, campaign_id):
+        """Get all recipients for a campaign"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, account, full_name, email, cc, attachment_path, status, 
+                       attempt_number, last_error, row_index
+                FROM recipients 
+                WHERE campaign_id = ?
+                ORDER BY row_index
+            ''', (campaign_id,))
+            recipients = cursor.fetchall()
+            conn.close()
+            return recipients
+        except Exception as e:
+            print(f"Error getting campaign recipients: {e}")
+            return []
+    
+    def get_pending_recipients(self, campaign_id):
+        """Get pending recipients for a campaign"""
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, account, full_name, email, cc, attachment_path, row_index
+                FROM recipients 
+                WHERE campaign_id = ? AND status = 'pending'
+                ORDER BY row_index
+            ''', (campaign_id,))
+            recipients = cursor.fetchall()
+            conn.close()
+            return recipients
+        except Exception as e:
+            print(f"Error getting pending recipients: {e}")
+            return []
 
 # =====================================================
 # SETTINGS MANAGER
 # =====================================================
 class SettingsManager:
     def __init__(self, config_file="settings.json"):
-        # Handle both script and executable environments
+        # Initialize database manager
+        self.db_manager = DatabaseManager()
+        
+        # Handle both script and executable environments for JSON fallback
         if getattr(sys, 'frozen', False):
             # Running as PyInstaller executable
             # Use user's home directory for settings to ensure writability
@@ -37,6 +388,7 @@ class SettingsManager:
             # Running as script
             script_dir = os.path.dirname(os.path.abspath(__file__))
             self.config_file = os.path.join(script_dir, config_file)
+        
         self.default_settings = {
             "window_geometry": None,
             "paragraph_spacing": 12,
@@ -47,26 +399,48 @@ class SettingsManager:
             "max_retries": 3,
             "last_selected_template": "default"
         }
+        
+        # Migrate from JSON to database if JSON exists
+        self.migrate_from_json()
+        
+        # Load settings from database
         self.settings = self.load_settings()
     
-    def load_settings(self):
-        try:
-            if os.path.exists(self.config_file):
+    def migrate_from_json(self):
+        """Migrate settings from JSON file to database"""
+        if os.path.exists(self.config_file):
+            try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
-                    loaded_settings = json.load(f)
-                    # Merge with defaults to handle missing keys
-                    settings = self.default_settings.copy()
-                    settings.update(loaded_settings)
-                    return settings
-            else:
-                return self.default_settings.copy()
+                    json_settings = json.load(f)
+                    # Save each setting to database
+                    for key, value in json_settings.items():
+                        self.db_manager.save_setting(key, value)
+                # Backup and remove old JSON file
+                backup_file = self.config_file + ".backup"
+                os.rename(self.config_file, backup_file)
+                print(f"Migrated settings from JSON to database. Backup saved to {backup_file}")
+            except Exception as e:
+                print(f"Error migrating settings: {e}")
+    
+    def load_settings(self):
+        """Load settings from database"""
+        try:
+            settings = self.default_settings.copy()
+            # Load known settings from database
+            for key in self.default_settings.keys():
+                value = self.db_manager.get_setting(key)
+                if value is not None:
+                    settings[key] = value
+            return settings
         except Exception as e:
+            print(f"Error loading settings: {e}")
             return self.default_settings.copy()
     
     def save_settings(self):
+        """Save settings to database"""
         try:
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self.settings, f, indent=2, ensure_ascii=False)
+            for key, value in self.settings.items():
+                self.db_manager.save_setting(key, value)
             return True
         except Exception:
             return False
@@ -76,7 +450,102 @@ class SettingsManager:
     
     def set(self, key, value):
         self.settings[key] = value
-        self.save_settings()
+        self.db_manager.save_setting(key, value)
+
+# =====================================================
+# EMAIL STATE MACHINE
+# =====================================================
+class EmailState:
+    """Email sending states for proper state tracking"""
+    PENDING = "Pending"
+    VALIDATING = "Validating"
+    SENDING = "Sending"
+    SUBMITTED = "Submitted"
+    CONFIRMED = "Confirmed"
+    FAILED = "Failed"
+    UNKNOWN = "Unknown"
+    SKIPPED = "Skipped"
+    CANCELLED = "Cancelled"
+    
+    @staticmethod
+    def is_terminal(state):
+        """States that are final and should not be automatically retried"""
+        return state in [EmailState.CONFIRMED, EmailState.SKIPPED, EmailState.CANCELLED]
+    
+    @staticmethod
+    def can_retry(state):
+        """States that can be safely retried"""
+        return state in [EmailState.FAILED]
+    
+    @staticmethod
+    def is_uncertain(state):
+        """States where we're unsure if the email was sent"""
+        return state in [EmailState.UNKNOWN, EmailState.SUBMITTED]
+
+# =====================================================
+# OUTLOOK CLIENT MANAGER
+# =====================================================
+class OutlookClient:
+    """Manages Outlook COM connection lifecycle"""
+    
+    def __init__(self):
+        self.outlook = None
+        self.namespace = None
+        self.outbox = None
+        self.sent = None
+        self.is_connected = False
+    
+    def connect(self, max_attempts=5, retry_delay=3):
+        """Connect to Outlook with retry logic"""
+        import pythoncom
+        
+        for attempt in range(max_attempts):
+            try:
+                pythoncom.CoInitialize()
+                self.outlook = win32com.client.Dispatch("Outlook.Application")
+                self.namespace = self.outlook.GetNamespace("MAPI")
+                self.outbox = self.namespace.GetDefaultFolder(4)  # olFolderOutbox
+                self.sent = self.namespace.GetDefaultFolder(5)    # olFolderSentMail
+                self.is_connected = True
+                return True, "Connected to Outlook successfully"
+            except Exception as e:
+                if attempt < max_attempts - 1:
+                    time.sleep(retry_delay)
+                else:
+                    return False, f"Failed to connect to Outlook after {max_attempts} attempts: {str(e)}"
+        
+        return False, "Unknown connection error"
+    
+    def disconnect(self):
+        """Safely disconnect from Outlook"""
+        try:
+            import pythoncom
+            self.is_connected = False
+            self.outlook = None
+            self.namespace = None
+            self.outbox = None
+            self.sent = None
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass  # Best effort cleanup
+    
+    def is_available(self):
+        """Check if Outlook connection is available"""
+        if not self.is_connected or self.outlook is None:
+            return False
+        try:
+            # Try to access a simple property to test connection
+            _ = self.outlook.Version
+            return True
+        except Exception:
+            self.is_connected = False
+            return False
+    
+    def create_email(self):
+        """Create a new email item"""
+        if not self.is_available():
+            raise Exception("Outlook is not available")
+        return self.outlook.CreateItem(0)  # olMailItem
 
 # =====================================================
 # HELPER FUNCTION TO GET SURNAME
@@ -127,6 +596,23 @@ def validate_email(email):
     
     return True, ""
 
+def parse_cc_addresses(cc_string):
+    """Parse multiple CC addresses from semicolon or comma separated string"""
+    if not cc_string or not str(cc_string).strip():
+        return []
+    
+    cc_string = str(cc_string).strip()
+    # Try semicolon separator first, then comma
+    if ';' in cc_string:
+        addresses = [addr.strip() for addr in cc_string.split(';')]
+    elif ',' in cc_string:
+        addresses = [addr.strip() for addr in cc_string.split(',')]
+    else:
+        addresses = [cc_string]
+    
+    # Filter out empty addresses
+    return [addr for addr in addresses if addr]
+
 def validate_emails_in_dataframe(df, email_column="Email"):
     """
     Validate all emails in a dataframe column
@@ -153,6 +639,123 @@ def validate_emails_in_dataframe(df, email_column="Email"):
     
     valid_df = df.iloc[valid_indices].copy() if valid_indices else df.iloc[0:0].copy()
     return valid_df, invalid_emails
+
+# =====================================================
+# EXCEL VALIDATION
+# =====================================================
+def validate_excel_data(df):
+    """
+    Comprehensive Excel data validation before sending
+    Returns (is_valid: bool, validation_results: dict)
+    """
+    validation_results = {
+        'total_rows': len(df),
+        'valid_rows': 0,
+        'invalid_emails': [],
+        'missing_attachments': [],
+        'empty_required_fields': [],
+        'duplicate_recipients': [],
+        'invalid_cc': [],
+        'warnings': []
+    }
+    
+    if df is None or len(df) == 0:
+        validation_results['warnings'].append("Excel file is empty")
+        return False, validation_results
+    
+    # Check required columns
+    required_columns = ['Account', 'Full Name', 'Email', 'CC', 'Attachment Path']
+    missing_columns = [col for col in required_columns if col not in df.columns]
+    if missing_columns:
+        validation_results['warnings'].append(f"Missing columns: {', '.join(missing_columns)}")
+        return False, validation_results
+    
+    # Track seen emails for duplicate detection
+    seen_emails = {}
+    
+    for idx, row in df.iterrows():
+        row_num = idx + 2  # Excel row number
+        has_issues = False
+        
+        # Validate email
+        email = str(row['Email']).strip()
+        if email:
+            is_valid, error = validate_email(email)
+            if not is_valid:
+                validation_results['invalid_emails'].append({
+                    'row': row_num,
+                    'email': email,
+                    'error': error
+                })
+                has_issues = True
+            
+            # Check for duplicates
+            if email.lower() in seen_emails:
+                validation_results['duplicate_recipients'].append({
+                    'row': row_num,
+                    'email': email,
+                    'duplicate_row': seen_emails[email.lower()]
+                })
+                has_issues = True
+            else:
+                seen_emails[email.lower()] = row_num
+        else:
+            validation_results['empty_required_fields'].append({
+                'row': row_num,
+                'field': 'Email'
+            })
+            has_issues = True
+        
+        # Validate CC addresses
+        cc_value = str(row['CC']).strip()
+        if cc_value:
+            cc_addresses = parse_cc_addresses(cc_value)
+            for cc_addr in cc_addresses:
+                is_valid, error = validate_email(cc_addr)
+                if not is_valid:
+                    validation_results['invalid_cc'].append({
+                        'row': row_num,
+                        'cc': cc_addr,
+                        'error': error
+                    })
+                    has_issues = True
+        
+        # Validate attachment path
+        attachment = str(row['Attachment Path']).strip()
+        if attachment and not os.path.exists(attachment):
+            validation_results['missing_attachments'].append({
+                'row': row_num,
+                'path': attachment
+            })
+            has_issues = True
+        
+        # Check other required fields
+        if not str(row['Account']).strip():
+            validation_results['empty_required_fields'].append({
+                'row': row_num,
+                'field': 'Account'
+            })
+            has_issues = True
+        
+        if not str(row['Full Name']).strip():
+            validation_results['empty_required_fields'].append({
+                'row': row_num,
+                'field': 'Full Name'
+            })
+            has_issues = True
+        
+        if not has_issues:
+            validation_results['valid_rows'] += 1
+    
+    # Determine overall validity
+    is_valid = (
+        len(validation_results['invalid_emails']) == 0 and
+        len(validation_results['missing_attachments']) == 0 and
+        len(validation_results['empty_required_fields']) == 0 and
+        len(validation_results['invalid_cc']) == 0
+    )
+    
+    return is_valid, validation_results
 
 # =====================================================
 # OUTLOOK-SAFE HTML BUILDER
@@ -252,165 +855,365 @@ def build_outlook_safe_html(editor_html: str, para_spacing_px: int = 12) -> str:
     return wrapped
 
 # =====================================================
-# EMAIL WORKER THREAD WITH COM RETRY LOGIC
+# EMAIL WORKER THREAD WITH ENHANCED SAFETY
 # =====================================================
 class EmailWorker(QThread):
     progress_updated = Signal(int)
     log_updated = Signal(str)
     status_updated = Signal(int, str)
     finished_sending = Signal()
+    validation_complete = Signal(bool, object)  # is_valid, validation_results
+    campaign_created = Signal(str)  # campaign_id
 
-    def __init__(self, dataframe, subject, body_template, para_spacing_px=12, max_retries=3):
+    def __init__(self, dataframe, subject, body_template, para_spacing_px=12, max_retries=3, 
+                 send_delay=0, importance=2, request_read_receipt=True, campaign_name=None, db_manager=None, is_test_send=False):
         super().__init__()
         self.df = dataframe
         self.subject = subject
         self.body_template = body_template
         self.para_spacing_px = int(para_spacing_px) if para_spacing_px is not None else 12
         self.max_retries = max_retries
+        self.send_delay = send_delay
+        self.importance = importance  # 0=Low, 1=Normal, 2=High
+        self.request_read_receipt = request_read_receipt
         self.running = True
+        self.paused = False
+        
+        # Database manager for persistence
+        self.db_manager = db_manager
+        self.is_test_send = is_test_send
+        
+        # Campaign management
+        self.campaign_id = None
+        self.campaign_name = campaign_name or f"Campaign {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        
+        # Track recipient states and attempts
+        self.recipient_states = {}
+        self.recipient_attempts = {}
+        self.recipient_db_ids = {}  # Map row index to database ID
+        
+        # Initialize states
+        for idx in range(len(dataframe)):
+            self.recipient_states[idx] = EmailState.PENDING
+            self.recipient_attempts[idx] = 0
 
     def stop(self):
         self.running = False
 
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
     def run(self):
+        import pythoncom
+        
         try:
-            import pythoncom
             pythoncom.CoInitialize()
-
-            # ===== TRY CONNECTING TO OUTLOOK =====
-            outlook = None
-            for attempt in range(5):
-                try:
-                    outlook = win32com.client.Dispatch("Outlook.Application")
-                    self.log_updated.emit("✅ Connected to Outlook COM.")
-                    break
-                except Exception as e:
-                    self.log_updated.emit(f"⚠ Attempt {attempt +1} failed to connect Outlook: {e}")
-                    time.sleep(3)
-
-            if not outlook:
-                self.log_updated.emit("❌ Could not connect to Outlook. Make sure it is open and fully ready.")
-                self.finished_sending.emit()
-                return
-
-            namespace = outlook.GetNamespace("MAPI")
+            
             try:
-                outbox = namespace.GetDefaultFolder(4)  # olFolderOutbox
-                sent = namespace.GetDefaultFolder(5)    # olFolderSentMail
-            except Exception as e:
-                self.log_updated.emit(f"❌ Outlook is busy or not ready: {e}")
-                self.finished_sending.emit()
-                return
-
-            total = len(self.df)
-            processed_count = 0
-            failed_emails = []  # Track failed emails for retry
-
-            # First pass: try to send all emails
-            for index, row in self.df.iterrows():
-                if not self.running:
-                    self.log_updated.emit("⛔ Sending stopped by user.")
-                    break
-
-                success = self._send_single_email(outlook, outbox, sent, row, index)
+                # Phase 0: Create campaign in database (skip for test sends)
+                if self.db_manager and not self.is_test_send:
+                    # Generate unique campaign ID
+                    date_str = datetime.now().strftime('%Y%m%d')
+                    # Simple ID generation - in production you'd want something more robust
+                    self.campaign_id = f"ESM-{date_str}-{int(time.time())}"
+                    
+                    # Create campaign
+                    self.db_manager.create_campaign(self.campaign_id, self.campaign_name, len(self.df))
+                    self.campaign_created.emit(self.campaign_id)
+                    self.log_updated.emit(f"📋 Campaign created: {self.campaign_id}")
+                    
+                    # Add recipients to database
+                    for index, row in self.df.iterrows():
+                        recipient_id = self.db_manager.add_recipient(
+                            self.campaign_id,
+                            str(row.get("Account", "")),
+                            str(row.get("Full Name", "")),
+                            str(row.get("Email", "")),
+                            str(row.get("CC", "")),
+                            str(row.get("Attachment Path", "")),
+                            index
+                        )
+                        if recipient_id:
+                            self.recipient_db_ids[index] = recipient_id
+                
+                # Phase 1: Validation
+                self.log_updated.emit("🔍 Starting Excel data validation...")
+                is_valid, validation_results = validate_excel_data(self.df)
+                self.validation_complete.emit(is_valid, validation_results)
+                
+                if not is_valid and not self.is_test_send:
+                    self.log_updated.emit("❌ Validation failed. Please fix the errors before sending.")
+                    if self.db_manager:
+                        self.db_manager.update_campaign_status(self.campaign_id, 'validation_failed')
+                    self.finished_sending.emit()
+                    return
+                
+                self.log_updated.emit(f"✅ Validation complete. {validation_results['valid_rows']} valid rows ready to send.")
+                
+                # Phase 2: Connect to Outlook
+                outlook_client = OutlookClient()
+                success, message = outlook_client.connect()
+                
                 if not success:
-                    failed_emails.append((index, row))
+                    self.log_updated.emit(f"❌ {message}")
+                    self.log_updated.emit("Outlook is unavailable. Please make sure Microsoft Outlook is installed and configured, then try again.")
+                    if self.db_manager:
+                        self.db_manager.update_campaign_status(self.campaign_id, 'outlook_unavailable')
+                    self.finished_sending.emit()
+                    return
                 
-                processed_count += 1
-                percent = int((processed_count / total) * 100)
-                self.progress_updated.emit(percent)
-
-            # Retry failed emails if any
-            if failed_emails and self.max_retries > 0:
-                self.log_updated.emit(f"🔄 Retrying {len(failed_emails)} failed emails...")
+                self.log_updated.emit("✅ Connected to Outlook successfully.")
                 
-                for retry_attempt in range(self.max_retries):
-                    if not self.running or not failed_emails:
+                # Phase 3: Send emails
+                total = len(self.df)
+                processed_count = 0
+                
+                for index, row in self.df.iterrows():
+                    if not self.running:
+                        self.log_updated.emit("⛔ Sending stopped by user.")
+                        # Mark remaining as cancelled
+                        for idx in range(index, len(self.df)):
+                            if self.recipient_states[idx] == EmailState.PENDING:
+                                self.recipient_states[idx] = EmailState.CANCELLED
+                                self.status_updated.emit(idx, EmailState.CANCELLED)
                         break
                     
-                    self.log_updated.emit(f"🔄 Retry attempt {retry_attempt + 1}/{self.max_retries}")
-                    still_failed = []
+                    # Wait if paused
+                    while self.paused and self.running:
+                        time.sleep(0.1)
                     
-                    for index, row in failed_emails:
-                        if not self.running:
+                    if not self.running:
+                        break
+                    
+                    # Skip if already processed
+                    if EmailState.is_terminal(self.recipient_states[index]):
+                        processed_count += 1
+                        percent = int((processed_count / total) * 100)
+                        self.progress_updated.emit(percent)
+                        continue
+                    
+                    # Process this recipient
+                    self.recipient_states[index] = EmailState.SENDING
+                    self.status_updated.emit(index, EmailState.SENDING)
+                    
+                    result = self._send_single_email(outlook_client, row, index)
+                    
+                    if result['success']:
+                        self.recipient_states[index] = EmailState.CONFIRMED
+                        self.status_updated.emit(index, EmailState.CONFIRMED)
+                        self.log_updated.emit(f"✅ Sent to {result['email']}")
+                        
+                        # Update database
+                        if self.db_manager and index in self.recipient_db_ids:
+                            recipient_id = self.recipient_db_ids[index]
+                            self.db_manager.update_recipient_status(recipient_id, EmailState.CONFIRMED)
+                            self.db_manager.log_send_attempt(recipient_id, self.campaign_id, 
+                                                           self.recipient_attempts[index] + 1, 
+                                                           EmailState.CONFIRMED)
+                            
+                    elif result['state'] == EmailState.UNKNOWN:
+                        self.recipient_states[index] = EmailState.UNKNOWN
+                        self.status_updated.emit(index, EmailState.UNKNOWN)
+                        self.log_updated.emit(f"⚠️ Uncertain state for {result['email']}: {result['error']}")
+                        
+                        # Update database
+                        if self.db_manager and index in self.recipient_db_ids:
+                            recipient_id = self.recipient_db_ids[index]
+                            self.db_manager.update_recipient_status(recipient_id, EmailState.UNKNOWN, result['error'])
+                            self.db_manager.log_send_attempt(recipient_id, self.campaign_id,
+                                                           self.recipient_attempts[index] + 1,
+                                                           EmailState.UNKNOWN, result['error'])
+                            
+                    else:
+                        self.recipient_states[index] = EmailState.FAILED
+                        self.status_updated.emit(index, EmailState.FAILED)
+                        self.log_updated.emit(f"❌ Failed to send to {result['email']}: {result['error']}")
+                        
+                        # Update database
+                        if self.db_manager and index in self.recipient_db_ids:
+                            recipient_id = self.recipient_db_ids[index]
+                            self.db_manager.update_recipient_status(recipient_id, EmailState.FAILED, result['error'])
+                            self.db_manager.log_send_attempt(recipient_id, self.campaign_id,
+                                                           self.recipient_attempts[index] + 1,
+                                                           EmailState.FAILED, result['error'])
+                    
+                    # Apply delay between emails
+                    if self.send_delay > 0 and index < len(self.df) - 1:
+                        time.sleep(self.send_delay)
+                    
+                    processed_count += 1
+                    percent = int((processed_count / total) * 100)
+                    self.progress_updated.emit(percent)
+                
+                # Phase 4: Retry failed emails (only true failures, not unknown)
+                failed_indices = [idx for idx, state in self.recipient_states.items() 
+                                if state == EmailState.FAILED and self.recipient_attempts[idx] < self.max_retries]
+                
+                if failed_indices and self.max_retries > 0:
+                    self.log_updated.emit(f"🔄 Retrying {len(failed_indices)} failed emails...")
+                    
+                    for retry_attempt in range(self.max_retries):
+                        if not self.running or not failed_indices:
                             break
                         
-                        success = self._send_single_email(outlook, outbox, sent, row, index)
-                        if not success:
-                            still_failed.append((index, row))
-                    
-                    failed_emails = still_failed
-                    
-                    if failed_emails:
-                        time.sleep(2)  # Wait before next retry attempt
-
-            if failed_emails:
-                self.log_updated.emit(f"⚠️ {len(failed_emails)} emails still failed after all retries")
-
-            self.finished_sending.emit()
-
+                        self.log_updated.emit(f"🔄 Retry attempt {retry_attempt + 1}/{self.max_retries}")
+                        still_failed = []
+                        
+                        for index in failed_indices:
+                            if not self.running:
+                                break
+                            
+                            while self.paused and self.running:
+                                time.sleep(0.1)
+                            
+                            if not self.running:
+                                break
+                            
+                            row = self.df.iloc[index]
+                            self.recipient_states[index] = EmailState.SENDING
+                            self.status_updated.emit(index, EmailState.SENDING)
+                            self.recipient_attempts[index] += 1
+                            
+                            result = self._send_single_email(outlook_client, row, index)
+                            
+                            if result['success']:
+                                self.recipient_states[index] = EmailState.CONFIRMED
+                                self.status_updated.emit(index, EmailState.CONFIRMED)
+                                self.log_updated.emit(f"✅ Sent to {result['email']}")
+                            elif result['state'] == EmailState.UNKNOWN:
+                                self.recipient_states[index] = EmailState.UNKNOWN
+                                self.status_updated.emit(index, EmailState.UNKNOWN)
+                                still_failed.append(index)
+                            else:
+                                self.recipient_states[index] = EmailState.FAILED
+                                self.status_updated.emit(index, EmailState.FAILED)
+                                still_failed.append(index)
+                            
+                            if self.send_delay > 0:
+                                time.sleep(self.send_delay)
+                        
+                        failed_indices = still_failed
+                        
+                        if failed_indices:
+                            time.sleep(2)  # Wait before next retry attempt
+                
+                # Summary
+                confirmed = sum(1 for state in self.recipient_states.values() if state == EmailState.CONFIRMED)
+                failed = sum(1 for state in self.recipient_states.values() if state == EmailState.FAILED)
+                unknown = sum(1 for state in self.recipient_states.values() if state == EmailState.UNKNOWN)
+                cancelled = sum(1 for state in self.recipient_states.values() if state == EmailState.CANCELLED)
+                
+                self.log_updated.emit(f"📊 Sending complete: {confirmed} sent, {failed} failed, {unknown} unknown, {cancelled} cancelled")
+                
+                if unknown > 0:
+                    self.log_updated.emit("⚠️ Some emails have unknown status. These were not automatically retried to prevent duplicate sends.")
+                
+                # Update campaign in database
+                if self.db_manager and not self.is_test_send:
+                    self.db_manager.update_campaign_counts(self.campaign_id)
+                    if cancelled > 0:
+                        self.db_manager.update_campaign_status(self.campaign_id, 'cancelled')
+                    else:
+                        self.db_manager.update_campaign_status(self.campaign_id, 'completed')
+                
+                self.finished_sending.emit()
+                
+            finally:
+                outlook_client.disconnect()
+                pythoncom.CoUninitialize()
+                
         except Exception as e:
             self.log_updated.emit(f"FATAL ERROR in worker: {str(e)}")
             self.finished_sending.emit()
 
-    def _send_single_email(self, outlook, outbox, sent, row, index):
-        """Send a single email with error handling"""
+    def _send_single_email(self, outlook_client, row, index):
+        """Send a single email with enhanced error handling and state tracking"""
         try:
             email = str(row["Email"]).strip()
             cc_value = str(row["CC"]).strip()
             attachment = str(row["Attachment Path"]).strip()
-
+            
             if not email:
-                self.status_updated.emit(index, "Failed")
-                self.log_updated.emit(f"❌ No email for row {index + 2}")
-                return False
-                
-            if not os.path.exists(attachment):
-                self.status_updated.emit(index, "Failed")
-                self.log_updated.emit(f"❌ Attachment not found: {attachment}")
-                return False
-
-            start_sent_count = sent.Items.Count
-
-            # --- ✅ NEW LOGIC HERE ---
-            account = str(row["Account"]).strip()       # e.g. "ACC-001"
-            full_name = str(row["Full Name"]).strip()   # e.g. "Dela Cruz, Juan"
-            surname = get_surname(full_name)            # e.g. "Dela Cruz"
-
-            # Replace placeholders accordingly
+                return {'success': False, 'state': EmailState.FAILED, 'email': email, 'error': 'No email address'}
+            
+            # Check attachment (should have been validated, but double-check)
+            if attachment and not os.path.exists(attachment):
+                return {'success': False, 'state': EmailState.FAILED, 'email': email, 'error': f'Attachment not found: {attachment}'}
+            
+            # Get starting sent count
+            start_sent_count = outlook_client.sent.Items.Count
+            
+            # Prepare email content
+            account = str(row["Account"]).strip()
+            full_name = str(row["Full Name"]).strip()
+            surname = get_surname(full_name)
+            
+            # Replace placeholders
             subject = self.subject.replace("{{account}}", account).replace("{{Account}}", account).replace("{{fullname}}", full_name)
             body_raw = self.body_template.replace("{{fullname}}", surname)
             body = build_outlook_safe_html(body_raw, self.para_spacing_px)
-
-            mail = outlook.CreateItem(0)  # olMailItem
+            
+            # Create email
+            mail = outlook_client.create_email()
             mail.To = email
-            if cc_value:  # Only set CC if not empty
-                mail.CC = cc_value
-            mail.Subject = subject        # ✅ Full name in subject
+            
+            # Handle CC addresses
+            if cc_value:
+                cc_addresses = parse_cc_addresses(cc_value)
+                valid_cc = []
+                for cc_addr in cc_addresses:
+                    is_valid, _ = validate_email(cc_addr)
+                    if is_valid:
+                        valid_cc.append(cc_addr)
+                if valid_cc:
+                    mail.CC = ";".join(valid_cc)
+            
+            mail.Subject = subject
+            
             try:
-                mail.BodyFormat = 2  # 2 = olFormatHTML
+                mail.BodyFormat = 2  # olFormatHTML
             except Exception:
                 pass
-            mail.HTMLBody = body          # ✅ Surname in body
-            mail.Importance = 2  # High
-            mail.ReadReceiptRequested = True
-            mail.Attachments.Add(attachment)
+            
+            mail.HTMLBody = body
+            mail.Importance = self.importance  # 0=Low, 1=Normal, 2=High
+            mail.ReadReceiptRequested = self.request_read_receipt
+            
+            # Add attachment if path provided
+            if attachment:
+                mail.Attachments.Add(attachment)
+            
+            # Send the email
             mail.Send()
-
-            # Wait until sent or max 30 sec
-            for _ in range(30):
-                if outbox.Items.Count == 0 or sent.Items.Count > start_sent_count:
-                    break
-                time.sleep(1)
-
-            self.status_updated.emit(index, "Sent")
-            self.log_updated.emit(f"✅ Sent to {email}")
-            return True
-
+            
+            # Wait for confirmation (max 30 seconds)
+            confirmation_received = False
+            for wait_attempt in range(30):
+                try:
+                    if outlook_client.outbox.Items.Count == 0 or outlook_client.sent.Items.Count > start_sent_count:
+                        confirmation_received = True
+                        break
+                    time.sleep(1)
+                except Exception:
+                    # Outlook became unavailable during wait
+                    return {'success': False, 'state': EmailState.UNKNOWN, 'email': email, 'error': 'Outlook unavailable during confirmation wait'}
+            
+            if confirmation_received:
+                return {'success': True, 'state': EmailState.CONFIRMED, 'email': email, 'error': None}
+            else:
+                # Timeout - we don't know if it was sent
+                return {'success': False, 'state': EmailState.UNKNOWN, 'email': email, 'error': 'Confirmation timeout - email may have been sent'}
+            
         except Exception as e:
-            self.status_updated.emit(index, "Failed")
-            self.log_updated.emit(f"❌ Error sending to {email}: {str(e)}")
-            return False
+            error_msg = str(e)
+            # Check if this might be a transient error
+            if "unavailable" in error_msg.lower() or "not ready" in error_msg.lower():
+                return {'success': False, 'state': EmailState.UNKNOWN, 'email': email, 'error': error_msg}
+            else:
+                return {'success': False, 'state': EmailState.FAILED, 'email': email, 'error': error_msg}
 
 
 # =====================================================
@@ -420,11 +1223,17 @@ class EmailApp(QWidget):
     def __init__(self):
         super().__init__()
 
-        # Initialize settings manager
+        # Initialize database manager
+        self.db_manager = DatabaseManager()
+        
+        # Initialize settings manager (now uses database)
         self.settings = SettingsManager()
         
         # Setup file-based logging
         self.setup_logging()
+        
+        # Check for interrupted campaigns
+        self.check_interrupted_campaigns()
         
         self.setWindowTitle("📧 Eru Email Sender Pro")
         self.setMinimumSize(1400, 1000)
@@ -525,6 +1334,11 @@ class EmailApp(QWidget):
         
         self.df = None
         self.worker = None
+        self.current_campaign_id = None
+        
+        # Statistics update timer (initially stopped)
+        self.stats_timer = QTimer()
+        self.stats_timer.timeout.connect(self.update_statistics)
         
         # Initialize UI state
         self.load_templates()  # Load saved templates
@@ -532,6 +1346,161 @@ class EmailApp(QWidget):
         self.template_combo.blockSignals(False)
         self.setup_keyboard_shortcuts()  # Setup keyboard shortcuts
         self.update_ui_state()
+    
+    def check_interrupted_campaigns(self):
+        """Check for interrupted campaigns and show recovery dialog"""
+        try:
+            interrupted = self.db_manager.get_interrupted_campaigns()
+            if interrupted:
+                self.show_recovery_dialog(interrupted)
+        except Exception as e:
+            print(f"Error checking interrupted campaigns: {e}")
+    
+    def show_recovery_dialog(self, campaigns):
+        """Show dialog for interrupted campaign recovery"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextBrowser, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("⚠️ Interrupted Campaigns Found")
+        dialog.setMinimumSize(600, 400)
+        dialog.setStyleSheet(self.modern_styles())
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Information label
+        info_label = QLabel("The following campaigns were interrupted and can be resumed:")
+        layout.addWidget(info_label)
+        
+        # Campaign list
+        campaign_list = QListWidget()
+        for campaign in campaigns:
+            (campaign_id, name, total, confirmed, failed, unknown, cancelled, started_at) = campaign
+            pending = total - confirmed - failed - unknown - cancelled
+            item_text = f"{name} ({campaign_id})\n"
+            item_text += f"  Total: {total} | Sent: {confirmed} | Failed: {failed} | Unknown: {unknown} | Pending: {pending}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, campaign_id)
+            campaign_list.addItem(item)
+        
+        layout.addWidget(campaign_list)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        resume_button = QPushButton("📥 Resume Selected")
+        resume_button.setObjectName("successButton")
+        resume_button.clicked.connect(lambda: self.resume_campaign(dialog, campaign_list))
+        
+        review_button = QPushButton("👁️ Review Details")
+        review_button.setObjectName("primaryButton")
+        review_button.clicked.connect(lambda: self.review_campaign(dialog, campaign_list))
+        
+        cancel_button = QPushButton("❌ Cancel")
+        cancel_button.setObjectName("dangerButton")
+        cancel_button.clicked.connect(dialog.close)
+        
+        button_layout.addWidget(resume_button)
+        button_layout.addWidget(review_button)
+        button_layout.addStretch()
+        button_layout.addWidget(cancel_button)
+        
+        layout.addLayout(button_layout)
+        
+        dialog.exec()
+    
+    def resume_campaign(self, dialog, campaign_list):
+        """Resume selected campaign"""
+        selected_items = campaign_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a campaign to resume.")
+            return
+        
+        campaign_id = selected_items[0].data(Qt.UserRole)
+        dialog.close()
+        
+        # Load campaign data
+        try:
+            recipients = self.db_manager.get_campaign_recipients(campaign_id)
+            if recipients:
+                # Convert to dataframe
+                data = []
+                for rec in recipients:
+                    (rec_id, account, full_name, email, cc, attachment_path, status, 
+                     attempt_number, last_error, row_index) = rec
+                    data.append({
+                        'Account': account,
+                        'Full Name': full_name,
+                        'Email': email,
+                        'CC': cc,
+                        'Attachment Path': attachment_path,
+                        'Status': status
+                    })
+                
+                self.df = pd.DataFrame(data)
+                self.populate_table()
+                self.update_ui_state()
+                
+                QMessageBox.information(self, "Campaign Loaded", 
+                                      f"Campaign {campaign_id} has been loaded. "
+                                      f"You can review the status and send pending emails.")
+                self.log(f"📥 Resumed campaign: {campaign_id}")
+            else:
+                QMessageBox.warning(self, "Error", "No recipients found for this campaign.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load campaign: {str(e)}")
+    
+    def review_campaign(self, dialog, campaign_list):
+        """Review selected campaign details"""
+        selected_items = campaign_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No Selection", "Please select a campaign to review.")
+            return
+        
+        campaign_id = selected_items[0].data(Qt.UserRole)
+        
+        # Show detailed information
+        try:
+            recipients = self.db_manager.get_campaign_recipients(campaign_id)
+            if recipients:
+                # Create a simple details dialog
+                from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit
+                
+                details_dialog = QDialog(self)
+                details_dialog.setWindowTitle(f"Campaign Details: {campaign_id}")
+                details_dialog.setMinimumSize(800, 600)
+                details_dialog.setStyleSheet(self.modern_styles())
+                
+                layout = QVBoxLayout(details_dialog)
+                
+                details_text = QTextEdit()
+                details_text.setReadOnly(True)
+                
+                # Build details text
+                details = f"Campaign ID: {campaign_id}\n\n"
+                details += "RECIPIENTS:\n"
+                details += "-" * 80 + "\n"
+                
+                for rec in recipients:
+                    (rec_id, account, full_name, email, cc, attachment_path, status, 
+                     attempt_number, last_error, row_index) = rec
+                    details += f"Row {row_index + 2}: {full_name} ({email})\n"
+                    details += f"  Status: {status} | Attempts: {attempt_number}\n"
+                    if last_error:
+                        details += f"  Last Error: {last_error}\n"
+                    details += "\n"
+                
+                details_text.setPlainText(details)
+                layout.addWidget(details_text)
+                
+                close_button = QPushButton("Close")
+                close_button.clicked.connect(details_dialog.close)
+                layout.addWidget(close_button)
+                
+                details_dialog.exec()
+            else:
+                QMessageBox.warning(self, "Error", "No recipients found for this campaign.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load campaign details: {str(e)}")
 
     # =================================================
     # UI COMPONENT CREATION METHODS
@@ -600,11 +1569,41 @@ class EmailApp(QWidget):
         self.stop_button = QPushButton("⏹️ Stop")
         self.stop_button.setObjectName("dangerButton")
         
+        self.settings_button = QPushButton("⚙️ Settings")
+        self.settings_button.setObjectName("secondaryButton")
+        self.settings_button.clicked.connect(self.show_settings_dialog)
+        
+        # Enhanced sending controls
+        self.pause_button = QPushButton("⏸️ Pause")
+        self.pause_button.setObjectName("secondaryButton")
+        self.pause_button.setEnabled(False)
+        
+        self.resume_button = QPushButton("▶️ Resume")
+        self.resume_button.setObjectName("successButton")
+        self.resume_button.setEnabled(False)
+        
+        self.retry_failed_button = QPushButton("🔄 Retry Failed")
+        self.retry_failed_button.setObjectName("primaryButton")
+        self.retry_failed_button.setEnabled(False)
+        
+        self.test_send_button = QPushButton("🧪 Test Send")
+        self.test_send_button.setObjectName("secondaryButton")
+        
+        self.view_history_button = QPushButton("📜 History")
+        self.view_history_button.setObjectName("secondaryButton")
+        self.view_history_button.clicked.connect(self.view_campaign_history)
+        
         # Add buttons to layout
         controls_layout.addWidget(self.export_button)
         controls_layout.addWidget(self.load_button)
+        controls_layout.addWidget(self.settings_button)
+        controls_layout.addWidget(self.test_send_button)
+        controls_layout.addWidget(self.view_history_button)
         controls_layout.addStretch()
         controls_layout.addWidget(self.start_button)
+        controls_layout.addWidget(self.pause_button)
+        controls_layout.addWidget(self.resume_button)
+        controls_layout.addWidget(self.retry_failed_button)
         controls_layout.addWidget(self.stop_button)
         
         return controls_frame
@@ -616,6 +1615,27 @@ class EmailApp(QWidget):
         table_layout = QVBoxLayout(table_frame)
         table_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Statistics cards
+        stats_row = QHBoxLayout()
+        
+        # Total card
+        self.stat_total, self.stat_total_value = self.create_stat_card("📊 Total", "0", "#3b82f6")
+        stats_row.addWidget(self.stat_total)
+        
+        # Sent card
+        self.stat_sent, self.stat_sent_value = self.create_stat_card("✅ Sent", "0", "#10b981")
+        stats_row.addWidget(self.stat_sent)
+        
+        # Failed card
+        self.stat_failed, self.stat_failed_value = self.create_stat_card("❌ Failed", "0", "#ef4444")
+        stats_row.addWidget(self.stat_failed)
+        
+        # Pending card
+        self.stat_pending, self.stat_pending_value = self.create_stat_card("⏳ Pending", "0", "#f59e0b")
+        stats_row.addWidget(self.stat_pending)
+        
+        table_layout.addLayout(stats_row)
+        
         # Table header with counter
         header_row = QHBoxLayout()
         table_header = QLabel("📋 Recipient Data")
@@ -623,17 +1643,6 @@ class EmailApp(QWidget):
         
         self.recipient_counter = QLabel("📊 0 recipients loaded")
         self.recipient_counter.setObjectName("recipientCounter")
-        self.recipient_counter.setStyleSheet("""
-            QLabel#recipientCounter {
-                color: #64748b;
-                font-size: 10pt;
-                font-weight: 500;
-                padding: 4px 8px;
-                background: #f1f5f9;
-                border-radius: 12px;
-                border: 1px solid #e2e8f0;
-            }
-        """)
         
         header_row.addWidget(table_header)
         header_row.addStretch()
@@ -650,6 +1659,49 @@ class EmailApp(QWidget):
         
         table_layout.addWidget(self.table)
         return table_frame
+    
+    def create_stat_card(self, title, value, color):
+        """Create a statistics card"""
+        card = QFrame()
+        card.setObjectName("statCard")
+        card.setStyleSheet(f"""
+            QFrame#statCard {{
+                background: white;
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 16px;
+            }}
+        """)
+        
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(6)
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                color: #64748b;
+                font-size: 9pt;
+                font-weight: 600;
+                letter-spacing: 0.2px;
+            }}
+        """)
+        
+        value_label = QLabel(value)
+        value_label.setStyleSheet(f"""
+            QLabel {{
+                color: {color};
+                font-size: 20pt;
+                font-weight: 700;
+                letter-spacing: -0.5px;
+            }}
+        """)
+        value_label.setAlignment(Qt.AlignCenter)
+        
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        
+        return card, value_label
     
     def create_email_panel(self):
         """Create the right panel with email composer"""
@@ -830,12 +1882,27 @@ class EmailApp(QWidget):
         has_data = self.df is not None and len(self.df) > 0
         self.start_button.setEnabled(has_data)
         self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
+        self.resume_button.setEnabled(False)
         
-        # Update recipient counter
+        # Check if there are failed emails to retry
+        has_failed = False
         if has_data:
-            recipient_count = len(self.df)
-            self.recipient_counter.setText(f"📊 {recipient_count} recipient{'s' if recipient_count != 1 else ''} loaded")
+            for idx in range(len(self.df)):
+                status = str(self.df.iloc[idx, 5]).lower()
+                if status == "failed":
+                    has_failed = True
+                    break
+        self.retry_failed_button.setEnabled(has_failed)
+        
+        # Update statistics cards
+        if has_data:
+            self.update_statistics()
         else:
+            self.stat_total_value.setText("0")
+            self.stat_sent_value.setText("0")
+            self.stat_failed_value.setText("0")
+            self.stat_pending_value.setText("0")
             self.recipient_counter.setText("📊 0 recipients loaded")
 
     # =================================================
@@ -901,7 +1968,7 @@ class EmailApp(QWidget):
             
             # Use validated dataframe
             df = valid_df
-            df["Status"] = "Pending"
+            df["Status"] = EmailState.PENDING
             self.df = df[["Account", "Full Name", "Email", "CC", "Attachment Path", "Status"]]
             self.populate_table()
             
@@ -940,7 +2007,7 @@ class EmailApp(QWidget):
         header.setDefaultSectionSize(100)  # Default width for stretch columns
         
         # Set specific width for Status column
-        header.resizeSection(5, 80)  # Status column width
+        header.resizeSection(5, 100)  # Status column width
         
         for i in range(len(self.df)):
             for j in range(len(self.df.columns)):
@@ -949,12 +2016,16 @@ class EmailApp(QWidget):
                 # Color code status
                 if j == 5:  # Status column
                     status = str(self.df.iloc[i, j]).lower()
-                    if status == "sent":
+                    if status == "confirmed" or status == "sent":
                         item.setBackground(QColor("#d4edda"))
                     elif status == "failed":
                         item.setBackground(QColor("#f8d7da"))
-                    elif status == "pending":
+                    elif status == "unknown":
                         item.setBackground(QColor("#fff3cd"))
+                    elif status == "pending":
+                        item.setBackground(QColor("#e2e8f0"))
+                    elif status == "sending":
+                        item.setBackground(QColor("#cce5ff"))
                 
                 self.table.setItem(i, j, item)
 
@@ -976,30 +2047,380 @@ class EmailApp(QWidget):
         try:
             spacing_px = int(self.spacing_select.currentData())
             max_retries = self.settings.get("max_retries", 3)
+            send_delay = self.settings.get("send_delay", 0)
+            importance = self.settings.get("importance", 2)
+            request_read_receipt = self.settings.get("request_read_receipt", True)
         except Exception:
             spacing_px = 12
             max_retries = 3
+            send_delay = 0
+            importance = 2
+            request_read_receipt = True
 
         # Save current settings
         self.settings.set("paragraph_spacing", spacing_px)
 
-        self.worker = EmailWorker(self.df, subject, body, spacing_px, max_retries)
+        # Create worker with enhanced safety features
+        self.worker = EmailWorker(
+            self.df, subject, body, spacing_px, max_retries,
+            send_delay=send_delay,
+            importance=importance,
+            request_read_receipt=request_read_receipt,
+            campaign_name=f"Campaign {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            db_manager=self.db_manager
+        )
+        
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.log_updated.connect(self.log)
         self.worker.status_updated.connect(self.update_status)
+        self.worker.validation_complete.connect(self.on_validation_complete)
+        self.worker.campaign_created.connect(self.on_campaign_created)
         self.worker.finished_sending.connect(self.finish_message)
         self.worker.start()
         
         # Update UI state
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.log("ℹ️ Email sending started. Opening Outlook")
+        self.pause_button.setEnabled(True)
+        self.resume_button.setEnabled(False)
+        self.stats_timer.start(1000)  # Start statistics update timer
+        self.log("ℹ️ Email sending process started.")
 
     def stop_sending(self):
         if self.worker:
             self.worker.stop()
+            self.stats_timer.stop()  # Stop statistics update timer
             self.log("⛔ Sending stopped by user.")
             self.update_ui_state()
+    
+    def pause_sending(self):
+        if self.worker:
+            self.worker.pause()
+            self.log("⏸️ Sending paused.")
+            self.pause_button.setEnabled(False)
+            self.resume_button.setEnabled(True)
+    
+    def resume_sending(self):
+        if self.worker:
+            self.worker.resume()
+            self.log("▶️ Sending resumed.")
+            self.pause_button.setEnabled(True)
+            self.resume_button.setEnabled(False)
+    
+    def retry_failed_emails(self):
+        """Retry only failed emails"""
+        if self.df is None:
+            QMessageBox.warning(self, "⚠️ Warning", "Please load an Excel file first.")
+            return
+        
+        # Find failed emails
+        failed_indices = []
+        for idx in range(len(self.df)):
+            status = str(self.df.iloc[idx, 5]).lower()
+            if status == "failed":
+                failed_indices.append(idx)
+        
+        if not failed_indices:
+            QMessageBox.information(self, "No Failed Emails", "There are no failed emails to retry.")
+            return
+        
+        reply = QMessageBox.question(self, "Confirm Retry", 
+                                   f"Retry {len(failed_indices)} failed emails?",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            # Reset failed status to pending
+            for idx in failed_indices:
+                self.df.iloc[idx, 5] = EmailState.PENDING
+                self.table.setItem(idx, 5, QTableWidgetItem(EmailState.PENDING))
+            
+            self.log(f"🔄 {len(failed_indices)} failed emails reset to pending. Click Start Sending to retry.")
+            self.update_ui_state()
+    
+    def test_send(self):
+        """Send a test email to verify configuration"""
+        if self.df is None or len(self.df) == 0:
+            QMessageBox.warning(self, "⚠️ Warning", "Please load an Excel file first.")
+            return
+        
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDialogButtonBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("🧪 Test Send")
+        dialog.setMinimumSize(400, 200)
+        dialog.setStyleSheet(self.modern_styles())
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Recipient selection
+        layout.addWidget(QLabel("Select recipient for test email:"))
+        recipient_combo = QComboBox()
+        
+        for idx in range(len(self.df)):
+            name = str(self.df.iloc[idx, 1])
+            email = str(self.df.iloc[idx, 2])
+            recipient_combo.addItem(f"{name} ({email})", idx)
+        
+        layout.addWidget(recipient_combo)
+        
+        # Dialog buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        if dialog.exec() == QDialog.Accepted:
+            idx = recipient_combo.currentData()
+            row = self.df.iloc[idx]
+            
+            subject = self.subject_input.text()
+            body = self.email_editor.toHtml()
+            spacing_px = int(self.spacing_select.currentData())
+            
+            # Create a single-item worker for test send
+            test_df = self.df.iloc[[idx]].copy()
+            
+            self.worker = EmailWorker(
+                test_df, subject, body, spacing_px, 0,
+                send_delay=0,
+                importance=self.settings.get("importance", 2),
+                request_read_receipt=self.settings.get("request_read_receipt", True),
+                campaign_name=f"Test Send {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                db_manager=None,  # Don't save test sends to database
+                is_test_send=True
+            )
+            
+            self.worker.progress_updated.connect(self.progress_bar.setValue)
+            self.worker.log_updated.connect(self.log)
+            self.worker.status_updated.connect(self.update_status)
+            self.worker.validation_complete.connect(self.on_validation_complete)
+            self.worker.finished_sending.connect(lambda: self.finish_test_send(dialog))
+            self.worker.start()
+            
+            self.log("🧪 Test send initiated...")
+    
+    def finish_test_send(self, dialog):
+        """Handle test send completion"""
+        if dialog:
+            QMessageBox.information(dialog, "Test Send Complete", "Test email has been sent.")
+        self.update_ui_state()
+    
+    def view_campaign_history(self):
+        """View campaign history from database"""
+        try:
+            from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit, QHBoxLayout, QLabel, QPushButton, QListWidget, QListWidgetItem
+            
+            # Get all campaigns from database
+            conn = self.db_manager.get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, name, total_recipients, confirmed_count, failed_count, 
+                       unknown_count, cancelled_count, status, started_at, completed_at
+                FROM campaigns 
+                ORDER BY started_at DESC
+                LIMIT 50
+            ''')
+            campaigns = cursor.fetchall()
+            conn.close()
+            
+            if not campaigns:
+                QMessageBox.information(self, "No History", "No campaign history found.")
+                return
+            
+            # Create history dialog
+            history_dialog = QDialog(self)
+            history_dialog.setWindowTitle("📜 Campaign History")
+            history_dialog.setMinimumSize(800, 600)
+            history_dialog.setStyleSheet(self.modern_styles())
+            
+            layout = QVBoxLayout(history_dialog)
+            
+            # Campaign list
+            layout.addWidget(QLabel("Select a campaign to view details:"))
+            campaign_list = QListWidget()
+            
+            for campaign in campaigns:
+                (campaign_id, name, total, confirmed, failed, unknown, cancelled, status, started_at, completed_at) = campaign
+                pending = total - confirmed - failed - unknown - cancelled
+                
+                item_text = f"{name} ({campaign_id})\n"
+                item_text += f"  Status: {status} | Total: {total} | Sent: {confirmed} | Failed: {failed} | Unknown: {unknown} | Pending: {pending}"
+                item_text += f"\n  Started: {started_at}"
+                if completed_at:
+                    item_text += f" | Completed: {completed_at}"
+                
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, campaign_id)
+                campaign_list.addItem(item)
+            
+            layout.addWidget(campaign_list)
+            
+            # Buttons
+            button_layout = QHBoxLayout()
+            
+            view_details_button = QPushButton("👁️ View Details")
+            view_details_button.setObjectName("primaryButton")
+            view_details_button.clicked.connect(lambda: self.view_campaign_details(history_dialog, campaign_list))
+            
+            delete_button = QPushButton("🗑️ Delete Campaign")
+            delete_button.setObjectName("dangerButton")
+            delete_button.clicked.connect(lambda: self.delete_campaign(history_dialog, campaign_list))
+            
+            close_button = QPushButton("❌ Close")
+            close_button.setObjectName("secondaryButton")
+            close_button.clicked.connect(history_dialog.close)
+            
+            button_layout.addWidget(view_details_button)
+            button_layout.addWidget(delete_button)
+            button_layout.addStretch()
+            button_layout.addWidget(close_button)
+            
+            layout.addLayout(button_layout)
+            
+            history_dialog.exec()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load campaign history: {str(e)}")
+    
+    def view_campaign_details(self, parent_dialog, campaign_list):
+        """View detailed information about a selected campaign"""
+        selected_items = campaign_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(parent_dialog, "No Selection", "Please select a campaign to view.")
+            return
+        
+        campaign_id = selected_items[0].data(Qt.UserRole)
+        
+        try:
+            recipients = self.db_manager.get_campaign_recipients(campaign_id)
+            if recipients:
+                from PySide6.QtWidgets import QDialog, QVBoxLayout, QTextEdit
+                
+                details_dialog = QDialog(parent_dialog)
+                details_dialog.setWindowTitle(f"Campaign Details: {campaign_id}")
+                details_dialog.setMinimumSize(900, 700)
+                details_dialog.setStyleSheet(self.modern_styles())
+                
+                layout = QVBoxLayout(details_dialog)
+                
+                details_text = QTextEdit()
+                details_text.setReadOnly(True)
+                
+                # Build details text
+                details = f"Campaign ID: {campaign_id}\n\n"
+                details += "RECIPIENTS:\n"
+                details += "=" * 80 + "\n"
+                
+                for rec in recipients:
+                    (rec_id, account, full_name, email, cc, attachment_path, status, 
+                     attempt_number, last_error, row_index) = rec
+                    details += f"Row {row_index + 2}: {full_name} ({email})\n"
+                    details += f"  Status: {status} | Attempts: {attempt_number}\n"
+                    if last_error:
+                        details += f"  Last Error: {last_error}\n"
+                    details += "\n"
+                
+                details_text.setPlainText(details)
+                layout.addWidget(details_text)
+                
+                close_button = QPushButton("Close")
+                close_button.clicked.connect(details_dialog.close)
+                layout.addWidget(close_button)
+                
+                details_dialog.exec()
+            else:
+                QMessageBox.warning(parent_dialog, "Error", "No recipients found for this campaign.")
+        except Exception as e:
+            QMessageBox.critical(parent_dialog, "Error", f"Failed to load campaign details: {str(e)}")
+    
+    def delete_campaign(self, parent_dialog, campaign_list):
+        """Delete a selected campaign"""
+        selected_items = campaign_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(parent_dialog, "No Selection", "Please select a campaign to delete.")
+            return
+        
+        campaign_id = selected_items[0].data(Qt.UserRole)
+        
+        reply = QMessageBox.question(parent_dialog, "Confirm Delete", 
+                                   f"Are you sure you want to delete campaign {campaign_id}?\n\nThis action cannot be undone.",
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            try:
+                conn = self.db_manager.get_connection()
+                cursor = conn.cursor()
+                
+                # Delete related records first
+                cursor.execute('DELETE FROM send_logs WHERE campaign_id = ?', (campaign_id,))
+                cursor.execute('DELETE FROM send_attempts WHERE campaign_id = ?', (campaign_id,))
+                cursor.execute('DELETE FROM recipients WHERE campaign_id = ?', (campaign_id,))
+                cursor.execute('DELETE FROM campaigns WHERE id = ?', (campaign_id,))
+                
+                conn.commit()
+                conn.close()
+                
+                # Refresh the list
+                parent_dialog.close()
+                self.view_campaign_history()  # Reopen with updated data
+                
+                QMessageBox.information(self, "Success", f"Campaign {campaign_id} has been deleted.")
+            except Exception as e:
+                QMessageBox.critical(parent_dialog, "Error", f"Failed to delete campaign: {str(e)}")
+
+    def on_campaign_created(self, campaign_id):
+        """Handle campaign creation"""
+        self.current_campaign_id = campaign_id
+        self.log(f"📋 Campaign ID: {campaign_id}")
+    
+    def on_validation_complete(self, is_valid, validation_results):
+        """Handle validation completion"""
+        if not is_valid and not (self.worker and self.worker.is_test_send):
+            # Show validation error dialog (skip for test sends)
+            error_msg = "Excel Validation Failed\n\n"
+            
+            if validation_results['invalid_emails']:
+                error_msg += f"Invalid Emails ({len(validation_results['invalid_emails'])}):\n"
+                for item in validation_results['invalid_emails'][:5]:
+                    error_msg += f"  Row {item['row']}: {item['email']} - {item['error']}\n"
+                if len(validation_results['invalid_emails']) > 5:
+                    error_msg += f"  ... and {len(validation_results['invalid_emails']) - 5} more\n"
+                error_msg += "\n"
+            
+            if validation_results['missing_attachments']:
+                error_msg += f"Missing Attachments ({len(validation_results['missing_attachments'])}):\n"
+                for item in validation_results['missing_attachments'][:5]:
+                    error_msg += f"  Row {item['row']}: {item['path']}\n"
+                if len(validation_results['missing_attachments']) > 5:
+                    error_msg += f"  ... and {len(validation_results['missing_attachments']) - 5} more\n"
+                error_msg += "\n"
+            
+            if validation_results['empty_required_fields']:
+                error_msg += f"Empty Required Fields ({len(validation_results['empty_required_fields'])}):\n"
+                for item in validation_results['empty_required_fields'][:5]:
+                    error_msg += f"  Row {item['row']}: {item['field']}\n"
+                if len(validation_results['empty_required_fields']) > 5:
+                    error_msg += f"  ... and {len(validation_results['empty_required_fields']) - 5} more\n"
+                error_msg += "\n"
+            
+            if validation_results['invalid_cc']:
+                error_msg += f"Invalid CC Addresses ({len(validation_results['invalid_cc'])}):\n"
+                for item in validation_results['invalid_cc'][:5]:
+                    error_msg += f"  Row {item['row']}: {item['cc']} - {item['error']}\n"
+                if len(validation_results['invalid_cc']) > 5:
+                    error_msg += f"  ... and {len(validation_results['invalid_cc']) - 5} more\n"
+                error_msg += "\n"
+            
+            if validation_results['duplicate_recipients']:
+                error_msg += f"Duplicate Recipients ({len(validation_results['duplicate_recipients'])}):\n"
+                for item in validation_results['duplicate_recipients'][:5]:
+                    error_msg += f"  Row {item['row']}: {item['email']} (duplicate of row {item['duplicate_row']})\n"
+                if len(validation_results['duplicate_recipients']) > 5:
+                    error_msg += f"  ... and {len(validation_results['duplicate_recipients']) - 5} more\n"
+                error_msg += "\n"
+            
+            error_msg += "Please fix these issues before sending."
+            QMessageBox.critical(self, "Validation Failed", error_msg)
 
     # =================================================
     # UPDATE STATUS & LOGS
@@ -1009,6 +2430,27 @@ class EmailApp(QWidget):
         # Update the dataframe as well
         if self.df is not None and row < len(self.df):
             self.df.iloc[row, 5] = status
+    
+    def update_statistics(self):
+        """Update statistics cards"""
+        if self.df is not None and len(self.df) > 0:
+            recipient_count = len(self.df)
+            confirmed = sum(1 for idx in range(len(self.df)) if str(self.df.iloc[idx, 5]).lower() == "confirmed")
+            failed = sum(1 for idx in range(len(self.df)) if str(self.df.iloc[idx, 5]).lower() == "failed")
+            pending = sum(1 for idx in range(len(self.df)) if str(self.df.iloc[idx, 5]).lower() == "pending")
+            unknown = sum(1 for idx in range(len(self.df)) if str(self.df.iloc[idx, 5]).lower() == "unknown")
+            
+            # Update stat cards
+            self.stat_total_value.setText(str(recipient_count))
+            self.stat_sent_value.setText(str(confirmed))
+            self.stat_failed_value.setText(str(failed))
+            self.stat_pending_value.setText(str(pending))
+            
+            # Update recipient counter with status breakdown
+            counter_text = f"📊 {recipient_count} recipient{'s' if recipient_count != 1 else ''} loaded"
+            if confirmed > 0 or failed > 0 or pending > 0 or unknown > 0:
+                counter_text += f" | ✅ {confirmed} | ❌ {failed} | ⏳ {pending} | ❓ {unknown}"
+            self.recipient_counter.setText(counter_text)
 
     def log(self, message):
         """Log message to both UI and file"""
@@ -1053,7 +2495,8 @@ class EmailApp(QWidget):
             print(f"Failed to setup logging: {e}")
 
     def finish_message(self):
-        QMessageBox.information(self, "✅ Complete", "All emails have been processed.")
+        self.stats_timer.stop()  # Stop statistics update timer
+        QMessageBox.information(self, "✅ Complete", "Email sending process has completed.")
         self.update_ui_state()
 
     # =================================================
@@ -1296,6 +2739,142 @@ class EmailApp(QWidget):
                 QMessageBox.information(self, "Success", f"Template '{template_name}' deleted.")
 
     # =================================================
+    # SETTINGS DIALOG
+    # =================================================
+    def show_settings_dialog(self):
+        """Show settings dialog"""
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QSpinBox, QCheckBox, QComboBox, QDialogButtonBox, QTabWidget, QWidget, QFormLayout, QGroupBox
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("⚙️ Settings")
+        dialog.setMinimumSize(600, 450)
+        dialog.setStyleSheet(self.modern_styles())
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Tab widget for settings categories
+        tab_widget = QTabWidget()
+        
+        # General Settings Tab
+        general_tab = QWidget()
+        general_layout = QVBoxLayout(general_tab)
+        
+        general_group = QGroupBox("General Settings")
+        general_group.setObjectName("inputGroup")
+        general_form = QFormLayout()
+        
+        # Max retries
+        max_retries_spin = QSpinBox()
+        max_retries_spin.setRange(0, 10)
+        max_retries_spin.setValue(self.settings.get("max_retries", 3))
+        general_form.addRow("Max Retries:", max_retries_spin)
+        
+        # Send delay
+        send_delay_spin = QSpinBox()
+        send_delay_spin.setRange(0, 60)
+        send_delay_spin.setValue(self.settings.get("send_delay", 0))
+        send_delay_spin.setSuffix(" seconds")
+        general_form.addRow("Send Delay:", send_delay_spin)
+        
+        # Auto-save interval
+        auto_save_spin = QSpinBox()
+        auto_save_spin.setRange(1, 60)
+        auto_save_spin.setValue(self.settings.get("auto_save_interval", 5))
+        auto_save_spin.setSuffix(" minutes")
+        general_form.addRow("Auto-save Interval:", auto_save_spin)
+        
+        general_group.setLayout(general_form)
+        general_layout.addWidget(general_group)
+        general_layout.addStretch()
+        
+        # Email Settings Tab
+        email_tab = QWidget()
+        email_layout = QVBoxLayout(email_tab)
+        
+        email_group = QGroupBox("Email Settings")
+        email_group.setObjectName("inputGroup")
+        email_form = QFormLayout()
+        
+        # Email importance
+        importance_combo = QComboBox()
+        importance_combo.addItem("Low", 0)
+        importance_combo.addItem("Normal", 1)
+        importance_combo.addItem("High", 2)
+        current_importance = self.settings.get("importance", 2)
+        for i in range(importance_combo.count()):
+            if importance_combo.itemData(i) == current_importance:
+                importance_combo.setCurrentIndex(i)
+                break
+        email_form.addRow("Email Importance:", importance_combo)
+        
+        # Read receipt
+        read_receipt_check = QCheckBox()
+        read_receipt_check.setChecked(self.settings.get("request_read_receipt", True))
+        email_form.addRow("Request Read Receipt:", read_receipt_check)
+        
+        # Retry failed emails
+        retry_check = QCheckBox()
+        retry_check.setChecked(self.settings.get("retry_failed_emails", True))
+        email_form.addRow("Retry Failed Emails:", retry_check)
+        
+        email_group.setLayout(email_form)
+        email_layout.addWidget(email_group)
+        email_layout.addStretch()
+        
+        # UI Settings Tab
+        ui_tab = QWidget()
+        ui_layout = QVBoxLayout(ui_tab)
+        
+        ui_group = QGroupBox("Interface Settings")
+        ui_group.setObjectName("inputGroup")
+        ui_form = QFormLayout()
+        
+        # Paragraph spacing
+        spacing_combo = QComboBox()
+        spacing_combo.addItem("Tight", 8)
+        spacing_combo.addItem("Normal", 12)
+        spacing_combo.addItem("Relaxed", 16)
+        current_spacing = self.settings.get("paragraph_spacing", 12)
+        for i in range(spacing_combo.count()):
+            if spacing_combo.itemData(i) == current_spacing:
+                spacing_combo.setCurrentIndex(i)
+                break
+        ui_form.addRow("Default Paragraph Spacing:", spacing_combo)
+        
+        ui_group.setLayout(ui_form)
+        ui_layout.addWidget(ui_group)
+        ui_layout.addStretch()
+        
+        # Add tabs
+        tab_widget.addTab(general_tab, "📋 General")
+        tab_widget.addTab(email_tab, "✉️ Email")
+        tab_widget.addTab(ui_tab, "🎨 Interface")
+        
+        layout.addWidget(tab_widget)
+        
+        # Dialog buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        # Show dialog
+        if dialog.exec() == QDialog.Accepted:
+            # Save settings
+            self.settings.set("max_retries", max_retries_spin.value())
+            self.settings.set("send_delay", send_delay_spin.value())
+            self.settings.set("auto_save_interval", auto_save_spin.value())
+            self.settings.set("importance", importance_combo.currentData())
+            self.settings.set("request_read_receipt", read_receipt_check.isChecked())
+            self.settings.set("retry_failed_emails", retry_check.isChecked())
+            self.settings.set("paragraph_spacing", spacing_combo.currentData())
+            
+            # Apply paragraph spacing change
+            self.apply_editor_paragraph_spacing(spacing_combo.currentData())
+            
+            QMessageBox.information(self, "Settings Saved", "Settings have been saved successfully.")
+
+    # =================================================
     # KEYBOARD SHORTCUTS
     # =================================================
     def setup_keyboard_shortcuts(self):
@@ -1374,52 +2953,52 @@ class EmailApp(QWidget):
            HEADER STYLES
            ============================================= */
         #headerTitle {
-            font-size: 24pt;
-            font-weight: 600;
-            color: #1e40af;
-            margin: 10px 0;
+            font-size: 28pt;
+            font-weight: 700;
+            color: #0f172a;
+            margin: 5px 0;
+            letter-spacing: -0.5px;
         }
         
         #headerSubtitle {
-            font-size: 12pt;
+            font-size: 11pt;
             color: #64748b;
-            margin-bottom: 10px;
+            margin-bottom: 15px;
+            font-weight: 400;
+            letter-spacing: 0.2px;
         }
         
         /* =============================================
            CONTROLS FRAME
            ============================================= */
         #controlsFrame {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #ffffff, stop:1 #f1f5f9);
+            background: white;
             border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            margin: 5px 0;
+            border-radius: 16px;
+            margin: 8px 0;
         }
         
         /* =============================================
            BUTTON STYLES
            ============================================= */
         QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #3b82f6, stop:1 #2563eb);
+            background: #2563eb;
             color: white;
             border: none;
-            border-radius: 8px;
-            padding: 12px 24px;
-            font-weight: 500;
-            font-size: 11pt;
-            min-width: 120px;
+            border-radius: 10px;
+            padding: 10px 20px;
+            font-weight: 600;
+            font-size: 10pt;
+            min-width: 100px;
+            letter-spacing: 0.3px;
         }
         
         QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #60a5fa, stop:1 #3b82f6);
+            background: #1d4ed8;
         }
         
         QPushButton:pressed {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #2563eb, stop:1 #1d4ed8);
+            background: #1e40af;
         }
         
         QPushButton:disabled {
@@ -1428,55 +3007,48 @@ class EmailApp(QWidget):
         }
         
         #primaryButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #6366f1, stop:1 #4f46e5);
+            background: #4f46e5;
         }
         
         #primaryButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #818cf8, stop:1 #6366f1);
+            background: #4338ca;
         }
         
         #successButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #10b981, stop:1 #059669);
+            background: #059669;
         }
         
         #successButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #34d399, stop:1 #10b981);
+            background: #047857;
         }
         
         #dangerButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #ef4444, stop:1 #dc2626);
+            background: #dc2626;
         }
         
         #dangerButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #f87171, stop:1 #ef4444);
+            background: #b91c1c;
         }
         
         #secondaryButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #64748b, stop:1 #475569);
+            background: #475569;
         }
         
         #secondaryButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #94a3b8, stop:1 #64748b);
+            background: #334155;
         }
         
         /* =============================================
            SECTION TITLES
            ============================================= */
         #sectionTitle {
-            font-size: 14pt;
-            font-weight: 600;
-            color: #1e40af;
-            margin: 5px 0;
-            padding: 8px 0;
+            font-size: 15pt;
+            font-weight: 700;
+            color: #0f172a;
+            margin: 8px 0;
+            padding: 10px 0;
             border-bottom: 2px solid #e2e8f0;
+            letter-spacing: -0.3px;
         }
         
         /* =============================================
@@ -1485,8 +3057,8 @@ class EmailApp(QWidget):
         #tableFrame, #emailFrame, #statusFrame {
             background: white;
             border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            padding: 15px;
+            border-radius: 16px;
+            padding: 20px;
         }
         
         /* =============================================
@@ -1494,14 +3066,20 @@ class EmailApp(QWidget):
            ============================================= */
         QLineEdit, QTextEdit, QComboBox {
             background: white;
-            border: 2px solid #e2e8f0;
+            border: 1px solid #cbd5e1;
             border-radius: 8px;
-            padding: 10px;
+            padding: 10px 12px;
             font-size: 11pt;
+            selection-background-color: #dbeafe;
         }
         
         QLineEdit:focus, QTextEdit:focus, QComboBox:focus {
             border: 2px solid #3b82f6;
+            outline: none;
+        }
+        
+        QLineEdit:hover, QTextEdit:hover, QComboBox:hover {
+            border: 1px solid #94a3b8;
         }
         
         /* =============================================
@@ -1510,30 +3088,33 @@ class EmailApp(QWidget):
         QTableWidget {
             background: white;
             border: 1px solid #e2e8f0;
-            border-radius: 8px;
+            border-radius: 12px;
             gridline-color: #f1f5f9;
-            selection-background-color: #3b82f6;
+            selection-background-color: #dbeafe;
+            selection-color: #0f172a;
             alternate-background-color: #f8fafc;
         }
         
         QTableWidget::item {
-            padding: 10px;
+            padding: 12px 10px;
             border-bottom: 1px solid #f1f5f9;
         }
         
         QTableWidget::item:selected {
-            background: #3b82f6;
-            color: white;
+            background: #dbeafe;
+            color: #0f172a;
         }
         
         QHeaderView::section {
             background: #f8fafc;
-            color: #374151;
-            padding: 12px;
+            color: #475569;
+            padding: 14px 12px;
             border: none;
             border-right: 1px solid #e2e8f0;
             border-bottom: 2px solid #e2e8f0;
             font-weight: 600;
+            font-size: 10pt;
+            letter-spacing: 0.3px;
         }
         
         /* =============================================
@@ -1542,18 +3123,19 @@ class EmailApp(QWidget):
         QProgressBar {
             background: #f1f5f9;
             border: 1px solid #e2e8f0;
-            border-radius: 8px;
+            border-radius: 10px;
             text-align: center;
-            color: #374151;
+            color: #475569;
             font-weight: 600;
-            height: 24px;
+            height: 28px;
+            font-size: 10pt;
         }
         
         QProgressBar::chunk {
             background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                stop:0 #10b981, stop:1 #059669);
-            border-radius: 6px;
-            margin: 2px;
+                stop:0 #3b82f6, stop:1 #2563eb);
+            border-radius: 8px;
+            margin: 3px;
         }
         
         /* =============================================
@@ -1562,17 +3144,19 @@ class EmailApp(QWidget):
         QGroupBox {
             background: #f8fafc;
             border: 1px solid #e2e8f0;
-            border-radius: 8px;
-            margin-top: 10px;
-            padding-top: 20px;
+            border-radius: 12px;
+            margin-top: 12px;
+            padding-top: 24px;
             font-weight: 600;
-            color: #374151;
+            color: #475569;
+            font-size: 11pt;
         }
         
         QGroupBox::title {
             subcontrol-origin: margin;
-            left: 10px;
-            padding: 0 5px;
+            left: 12px;
+            padding: 0 8px;
+            letter-spacing: 0.2px;
         }
         
         /* =============================================
@@ -1580,21 +3164,23 @@ class EmailApp(QWidget):
            ============================================= */
         QComboBox::drop-down {
             border: none;
-            width: 20px;
+            width: 24px;
         }
         
         QComboBox::down-arrow {
             image: none;
-            border-left: 5px solid transparent;
-            border-right: 5px solid transparent;
+            border-left: 4px solid transparent;
+            border-right: 4px solid transparent;
             border-top: 5px solid #64748b;
         }
         
         QComboBox QAbstractItemView {
             background: white;
             border: 1px solid #e2e8f0;
-            selection-background-color: #3b82f6;
-            color: #374151;
+            selection-background-color: #dbeafe;
+            selection-color: #0f172a;
+            color: #1e293b;
+            border-radius: 8px;
         }
         
         /* =============================================
@@ -1603,18 +3189,22 @@ class EmailApp(QWidget):
         QScrollBar:vertical {
             background: #f1f5f9;
             border: none;
-            border-radius: 6px;
-            width: 12px;
+            border-radius: 8px;
+            width: 10px;
         }
         
         QScrollBar::handle:vertical {
             background: #cbd5e1;
-            border-radius: 6px;
-            min-height: 20px;
+            border-radius: 8px;
+            min-height: 24px;
         }
         
         QScrollBar::handle:vertical:hover {
             background: #94a3b8;
+        }
+        
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
         }
         
         /* =============================================
@@ -1623,37 +3213,49 @@ class EmailApp(QWidget):
         #recipientCounter {
             background: #eff6ff;
             color: #1d4ed8;
-            border: 1px solid #3b82f6;
-            border-radius: 20px;
-            padding: 6px 12px;
+            border: 1px solid #bfdbfe;
+            border-radius: 24px;
+            padding: 8px 16px;
             font-weight: 600;
             font-size: 10pt;
+            letter-spacing: 0.2px;
         }
         
         #templateCombo, #spacingSelect {
             background: #f8fafc;
-            border: 2px solid #3b82f6;
+            border: 1px solid #cbd5e1;
         }
         
         #subjectInput {
             background: #eff6ff;
-            border: 2px solid #3b82f6;
+            border: 1px solid #bfdbfe;
             font-weight: 500;
         }
         
         #emailEditor {
             background: white;
-            border: 2px solid #e2e8f0;
+            border: 1px solid #e2e8f0;
             font-family: 'Segoe UI', system-ui, sans-serif;
-            line-height: 1.5;
+            line-height: 1.6;
         }
         
         #logBox {
-            background: #1e293b;
+            background: #0f172a;
             color: #e2e8f0;
-            border: 2px solid #334155;
-            font-family: 'Consolas', 'Monaco', monospace;
-            font-size: 10pt;
+            border: 1px solid #1e293b;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 9pt;
+            line-height: 1.4;
+        }
+        
+        /* =============================================
+           STAT CARDS
+           ============================================= */
+        #statCard {
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 16px;
         }
         
         /* =============================================
@@ -1662,38 +3264,55 @@ class EmailApp(QWidget):
         QTabWidget::pane {
             border: 1px solid #e2e8f0;
             background: white;
-            border-radius: 8px;
+            border-radius: 12px;
             top: -1px;
         }
         
         QTabBar::tab {
             background: #f8fafc;
             border: 1px solid #e2e8f0;
-            padding: 12px 24px;
-            margin-right: 2px;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            font-weight: 500;
-            font-size: 11pt;
+            padding: 14px 28px;
+            margin-right: 4px;
+            border-top-left-radius: 12px;
+            border-top-right-radius: 12px;
+            font-weight: 600;
+            font-size: 10pt;
             color: #64748b;
+            letter-spacing: 0.2px;
         }
         
         QTabBar::tab:selected {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #3b82f6, stop:1 #2563eb);
-            color: white;
+            background: white;
+            color: #0f172a;
             border-bottom: 2px solid #2563eb;
         }
         
         QTabBar::tab:hover:!selected {
-            background: #e2e8f0;
+            background: #f1f5f9;
             color: #1e40af;
         }
         
         #mainTabWidget QTabBar::tab {
-            min-width: 150px;
+            min-width: 160px;
+        }
+        
+        /* =============================================
+           DIALOG STYLES
+           ============================================= */
+        QDialog {
+            background: #f8fafc;
+        }
+        
+        QMessageBox {
+            background: white;
+        }
+        
+        QMessageBox QPushButton {
+            min-width: 80px;
+            padding: 8px 16px;
         }
         """
+
 
 # =====================================================
 # RUN APPLICATION
