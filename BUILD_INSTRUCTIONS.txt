@@ -1,71 +1,231 @@
-Eru Email Sender Pro - Build Instructions (v1.1.1)
-==============================================
+# Eru Email Sender Pro - Build Instructions
 
-Project Structure (Clean & Optimized):
-------------------------------------
-Essential Files Only:
-├── main.py                 # Main application source code
-├── requirements.txt         # Python dependencies
-├── EMAIL.ico             # Application icon
-├── version_info.txt       # Version information for executable
-├── Eru Email Sender Pro.spec  # PyInstaller configuration
-├── installer_script.iss  # Inno Setup installer script
-├── build_installer.bat    # Automated build script
-├── dist/                  # Built executable
-└── installer_output/      # Final installer (created by Inno Setup)
+## Prerequisites
 
-Removed Files:
-- .gitignore (development file)
-- README.md (documentation)
-- settings.json (user-specific, generated at runtime)
-- logs/ (runtime directory)
-- build/ (temporary build files)
+### Required Software
+1. **Python 3.8 or higher**
+   - Download from: https://www.python.org/downloads/
+   - During installation, check "Add Python to PATH"
 
-Build Process:
--------------
+2. **PyInstaller**
+   - Automatically installed via requirements.txt
+   - Or install manually: `pip install pyinstaller`
 
-Option 1: Automated Build (Recommended)
---------------------------------------
-Run: build_installer.bat
+3. **Inno Setup 6** (for installer creation)
+   - Download from: https://jrsoftware.org/isdl.php
+   - Install the Unicode version
+   - Default installation path is: `C:\Program Files (x86)\Inno Setup 6\`
+
+### Optional Software
+- **Microsoft Visual C++ Redistributable** (included in most Windows systems)
+- **Git** (if cloning from repository)
+
+## Building the Application
+
+### Quick Build (Automated)
+Run the provided batch script:
+```batch
+build_installer.bat
+```
+
 This will:
-1. Clean previous builds
-2. Build executable with PyInstaller
-3. Create installer with Inno Setup
-4. Output: installer_output/EruEmailSenderPro_Setup.exe
+1. Install all dependencies
+2. Build the EXE with PyInstaller
+3. Create the installer with Inno Setup
 
-Option 2: Manual Build
----------------------
-Step 1: Build Executable
+### Manual Build Steps
+
+#### Step 1: Install Dependencies
+```batch
+pip install -r requirements.txt
+```
+
+#### Step 2: Build EXE with PyInstaller
+```batch
 python -m PyInstaller --clean "Eru Email Sender Pro.spec"
+```
 
-Step 2: Create Installer
+This creates:
+- `dist/Eru Email Sender Pro.exe` - The main executable
+- `build/` - Build artifacts (can be deleted)
+- `*.spec` - PyInstaller configuration file
+
+#### Step 3: Create Installer with Inno Setup
+```batch
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer_script.iss
+```
 
-Final Output:
-------------
-- Executable: dist/Eru Email Sender Pro.exe (77.7 MB)
-- Installer: installer_output/EruEmailSenderPro_Setup.exe
+This creates:
+- `installer_output/Eru Email Sender Pro-Setup-2.0.0.exe` - The installer
 
-Installer Features:
-------------------
-- Modern wizard interface
-- Desktop shortcut option
-- Start menu shortcuts
-- Automatic uninstaller
-- Version information
-- Professional branding
-- 64-bit optimized
-- Admin privileges for proper installation
+## Build Options
 
-System Requirements:
--------------------
-- Windows 10/11 (64-bit)
-- Microsoft Outlook
-- Administrative rights for installation
+### PyInstaller Spec File Configuration
+The `Eru Email Sender Pro.spec` file contains:
+- **Single-file executable**: All files bundled into one EXE
+- **No console**: Windowed application (no command prompt)
+- **Icon**: EMAIL.ico included
+- **Version info**: Uses version_info.txt
+- **Hidden imports**: Required libraries for smooth operation
 
-Notes:
-------
-- The executable is self-contained with all dependencies
-- Settings are stored in %USERPROFILE%\EruEmailSender\settings.json
-- No additional files needed for distribution
-- Icon and version info embedded in executable
+### Inno Setup Script Configuration
+The `installer_script.iss` file contains:
+- **Professional installer**: Modern wizard interface
+- **Desktop shortcut**: Optional desktop icon
+- **Start menu entries**: Program group with icons
+- **Uninstaller**: Clean removal option
+- **Registry entries**: Application registration
+- **User data preservation**: Option to keep user data on uninstall
+
+## Output Files
+
+### Primary Outputs
+- **`dist/Eru Email Sender Pro.exe`** - Standalone executable (~40-60 MB)
+- **`installer_output/Eru Email Sender Pro-Setup-2.0.0.exe`** - Installer (~50-70 MB)
+
+### Artifacts (Can be deleted)
+- `build/` - PyInstaller build folder
+- `*.pyc` - Python bytecode files
+- `__pycache__/` - Python cache folder
+
+## Testing the Build
+
+### Test the EXE
+```batch
+cd dist
+"Eru Email Sender Pro.exe"
+```
+
+### Test the Installer
+```batch
+cd installer_output
+"Eru Email Sender Pro-Setup-2.0.0.exe"
+```
+
+## Distribution
+
+### Recommended Distribution
+Distribute the **installer file**:
+- `installer_output/Eru Email Sender Pro-Setup-2.0.0.exe`
+
+### Alternative Distribution
+For advanced users, you can distribute:
+- `dist/Eru Email Sender Pro.exe` (standalone EXE)
+- Include a README with instructions
+
+## Troubleshooting
+
+### Common Issues
+
+#### PyInstaller Build Fails
+**Problem**: `ModuleNotFoundError` or import errors
+**Solution**: 
+- Add missing modules to `hiddenimports` in the spec file
+- Ensure all dependencies are in requirements.txt
+
+#### Inno Setup Not Found
+**Problem**: `ERROR: Inno Setup is not installed`
+**Solution**:
+- Install Inno Setup from https://jrsoftware.org/isdl.php
+- Update the path in build_installer.bat if installed elsewhere
+
+#### EXE Crashes on Startup
+**Problem**: Application crashes immediately
+**Solution**:
+- Test with console mode: Change `console=False` to `console=True` in spec file
+- Check error messages in console
+- Ensure all dependencies are included
+
+#### Missing Icons
+**Problem**: EXE has default icon
+**Solution**:
+- Ensure EMAIL.ico is in the same directory as main.py
+- Check icon path in spec file
+
+#### Application Freezes
+**Problem**: UI becomes unresponsive
+**Solution**:
+- This is usually a threading issue
+- Check that worker threads are properly managed
+- Ensure COM operations are thread-safe
+
+## Advanced Options
+
+### Custom Version Information
+Edit `version_info.txt`:
+```
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(2,0,0,0),
+    prodvers=(2,0,0,0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+      StringTable(
+        u'040904B0',
+        [StringStruct(u'CompanyName', u'Eru Studio Inc.'),
+        StringStruct(u'FileDescription', u'Professional Email Automation System'),
+        StringStruct(u'FileVersion', u'2.0.0.0'),
+        StringStruct(u'InternalName', u'Eru Email Sender Pro'),
+        StringStruct(u'LegalCopyright', u'Copyright 2026 Eru Studio Inc.'),
+        StringStruct(u'OriginalFilename', u'Eru Email Sender Pro.exe'),
+        StringStruct(u'ProductName', u'Eru Email Sender Pro'),
+        StringStruct(u'ProductVersion', u'2.0.0.0')])
+      ]), 
+    VarFileInfo([VarStruct(u'Translation', [1033, 1200])])
+  ]
+)
+```
+
+### Custom Installer Configuration
+Edit `installer_script.iss` to customize:
+- Installation path
+- Shortcuts
+- Registry entries
+- File associations
+- Uninstall behavior
+
+### Build Optimization
+For smaller EXE size:
+- Remove unused dependencies from requirements.txt
+- Use UPX compression (already enabled)
+- Split into directory mode instead of single-file
+
+## Security Considerations
+
+### Code Signing
+For distribution, consider code signing:
+- Purchase a code signing certificate
+- Sign the EXE with: `signtool sign /f certificate.pfx /p password dist\Eru Email Sender Pro.exe`
+- Sign the installer with Inno Setup's signing options
+
+### Anti-Virus False Positives
+PyInstaller EXEs may trigger anti-virus:
+- Submit to VirusTotal for analysis
+- Consider code signing to reduce false positives
+- Add to vendor whitelists if necessary
+
+## Support
+
+For build issues:
+1. Check PyInstaller documentation: https://pyinstaller.org/
+2. Check Inno Setup documentation: https://jrsoftware.org/ishelp/
+3. Review GitHub issues: https://github.com/jhudel26/Eru-Email-Sender-Pro/issues
+
+## Version History
+
+### Version 2.0.0 (2026-08-25)
+- Modern UI/UX redesign
+- Enhanced sending controls
+- Campaign history browser
+- Settings configuration dialog
+- Test send functionality
+- Real-time statistics dashboard
+- Professional installer creation
