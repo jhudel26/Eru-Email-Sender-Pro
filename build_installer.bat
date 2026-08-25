@@ -17,12 +17,18 @@ if %errorlevel% neq 0 (
 )
 
 echo Step 1: Installing dependencies...
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 if %errorlevel% neq 0 (
     echo ERROR: Failed to install dependencies
+    echo Please check your Python version and pip installation
+    echo Current Python version:
+    python --version
+    echo.
+    echo If this is a version compatibility issue, check requirements.txt
     pause
     exit /b 1
 )
+echo Dependencies installed successfully.
 echo.
 
 echo Step 2: Building EXE with PyInstaller...
@@ -57,10 +63,22 @@ if not exist %INNO_PATH% (
 )
 
 if not exist %INNO_PATH% (
-    echo ERROR: Inno Setup is not installed
-    echo Please install Inno Setup from https://jrsoftware.org/isdl.php
+    echo WARNING: Inno Setup is not installed
+    echo Skipping installer creation...
+    echo.
+    echo ========================================
+    echo BUILD COMPLETED PARTIALLY!
+    echo ========================================
+    echo.
+    echo Output file:
+    echo - EXE: dist\Eru Email Sender Pro.exe
+    echo.
+    echo NOTE: Inno Setup is required to create the installer.
+    echo Install Inno Setup from https://jrsoftware.org/isdl.php
+    echo and run this script again to create the installer.
+    echo.
     pause
-    exit /b 1
+    exit /b 0
 )
 
 %INNO_PATH% installer_script.iss

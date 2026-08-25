@@ -140,14 +140,44 @@ The application tracks detailed states for each recipient:
 
 ## 🔧 Building Installer
 
-To create a professional installer:
+### Quick Build (Recommended)
+Run the automated build script:
+```bash
+build_installer.bat
+```
 
-1. **Build executable**
+This will:
+1. Install all dependencies
+2. Build the EXE with PyInstaller
+3. Create the professional installer with Inno Setup
+
+### Manual Build
+
+1. **Install dependencies**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Build executable**
    ```bash
    python -m PyInstaller --clean "Eru Email Sender Pro.spec"
    ```
 
-2. **The executable will be created in the `dist/` directory**
+3. **Create installer** (requires Inno Setup)
+   ```bash
+   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer_script.iss
+   ```
+
+### Output Files
+- **EXE**: `dist/Eru Email Sender Pro.exe` (~40-60 MB)
+- **Installer**: `installer_output/Eru Email Sender Pro-Setup-2.0.0.exe` (~50-70 MB)
+
+### Prerequisites
+- Python 3.8+
+- PyInstaller (included in requirements.txt)
+- Inno Setup 6 (for installer creation)
+
+For detailed build instructions, see `BUILD_INSTRUCTIONS.txt`.
 
 ## 📁 Project Structure
 

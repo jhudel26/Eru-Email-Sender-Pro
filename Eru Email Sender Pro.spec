@@ -6,8 +6,8 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('EMAIL.ico', '.')],
-    hiddenimports=['secrets', 'uuid', 'hashlib', 'hmac', 'base64', 'json', 'ui', 'ui.design_system', 'ui.components'],
+    datas=[],
+    hiddenimports=['secrets', 'uuid', 'hashlib', 'hmac', 'base64', 'json', 'PySide6.QtCore', 'PySide6.QtGui', 'PySide6.QtWidgets'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -40,6 +40,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='EMAIL.ico',
     version='version_info.txt'
 )
